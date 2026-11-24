@@ -1,0 +1,36 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Assignments · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* learner/assignments.html — view assignments, submit text/files, see marks and feedback. Role: learner.
+   Collections: learners, assignments, submissions */
+import { requireRole } from '../shared/auth.js';
+import { renderShell, esc, toast, fmtDate, setLoading, saveFile } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, list, getMyLearner } from './js/common.js';
+const { doc, setDoc, serverTimestamp, where } = fs;
+requireRole(['learner'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'learner', title: 'Assignments', nav: NAV });
+  main.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const l = await getMyLearner(p); if (!l) { main.innerHTML = '<div class="tcard">Your learner record is not linked yet.</div>'; return; }
+    const load = async () => {
+      const [as, ss] = await Promise.all([list('assignments', where('classId', '==', l.classId)), list('submissions', where('learnerId', '==', l.id))]);
+      const sm = {}; ss.forEach(s => (sm[s.assignmentId] = s)); const today = new Date().toISOString().slice(0, 10);
+      main.innerHTML = as.sort((a, b) => (a.dueDate < b.dueDate ? 1 : -1)).map(a => { const s = sm[a.id], marked = s && s.score != null;
+        return `<div class="tcard" style="margin-bottom:10px" data-id="${esc(a.id)}"><strong>${esc(a.title)}</strong> <span class="muted">due ${esc(fmtDate(a.dueDate))}${a.dueDate < today && !s ? ' · overdue' : ''}</span><p>${esc(a.instructions || '')}</p>${(a.attachments || []).map(f => `<a href="${esc(f)}" target="_blank" rel="noopener">Attachment</a> `).join('')}
+        ${marked ? `<p><span class="pill">Marked</span> <strong>${esc(s.score)} / ${esc(a.outOf)}</strong></p><p class="muted">${esc(s.feedback || '')}</p>` : `${s ? '<p><span class="pill">Submitted</span> You can resubmit until it is marked.</p>' : ''}<textarea class="tin tx" rows="3" maxlength="4000" style="width:100%" placeholder="Your answer">${esc(s ? s.text || '' : '')}</textarea><div class="trow"><input class="fl" type="file" multiple aria-label="Attach files"><button class="tbtn sb">${s ? 'Resubmit' : 'Submit'}</button></div>`}</div>`; }).join('') || '<p class="muted">No assignments yet.</p>';
+      main.querySelectorAll('.sb').forEach(b => (b.onclick = async () => {
+        const card = b.closest('.tcard'), id = card.dataset.id, text = card.querySelector('.tx').value.trim(), fl = card.querySelector('.fl').files, old = sm[id];
+        if (!text && !fl.length && !(old && (old.files || []).length)) return toast('Write an answer or attach a file.', 'error');
+        setLoading(b, true);
+        try {
+          const files = [...(old ? old.files || [] : [])]; for (const f of fl) files.push((await saveFile(f, 'submissions')).url);
+          const d = { assignmentId: id, learnerId: l.id, text, files, submittedAt: serverTimestamp(), updatedAt: serverTimestamp() }; if (!old) { d.createdAt = serverTimestamp(); d.createdBy = p.uid; }
+          await setDoc(doc(db, 'submissions', id + '_' + l.id), d, { merge: true }); toast('Submitted', 'success'); load();
+        } catch (e) { console.error(e); toast('Could not submit. Try again.', 'error'); setLoading(b, false); }
+      }));
+    };
+    await load();
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load assignments.</div>'; }
+});
+</script></body></html>

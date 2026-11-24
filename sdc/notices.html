@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Notices | SDC</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * sdc/notices.html
+ * Purpose: SDC notices to parents, staff and learners (shown on their portals).
+ * Role allowed: sdc, admin.
+ * Collections used: notices (only the ones this user created).
+ */
+import { fs } from '../shared/firebase.js';
+import { esc } from '../shared/ui.js';
+import { crudPage } from '../bursar/js/crud.js';
+import { SDC_NAV } from '../bursar/js/common.js';
+
+crudPage({
+  roles: ['sdc', 'admin'],
+  nav: SDC_NAV,
+  title: 'Notices',
+  intro: 'You see the notices you posted here. Everyone in the audience sees them on their own dashboard.',
+  collection: 'notices',
+  newLabel: 'Post notice',
+  empty: 'You have not posted any notices yet.',
+  auditSave: true,
+  where: (p) => [fs.where('createdBy', '==', p.uid)],
+  defaults: () => ({ source: 'sdc' }),
+  sort: (a, b) => (b.publishAt || '').localeCompare(a.publishAt || ''),
+  fields: [
+    { key: 'title', label: 'Title', type: 'text', required: true, max: 140 },
+    { key: 'publishAt', label: 'Show from', type: 'date', required: true, today: true },
+    { key: 'audience', label: 'Who should see it', type: 'multi', required: true, options: ['parent', 'learner', 'teacher', 'staff'] },
+    { key: 'pinned', label: 'Pin to the top', type: 'checkbox' },
+    { key: 'body', label: 'Message', type: 'textarea', required: true, wide: true, max: 3000 }
+  ],
+  columns: [
+    { label: 'Notice', html: (r) => `<strong>${esc(r.title)}</strong><br><small>${esc(String(r.body || '').slice(0, 120))}</small>` },
+    { label: 'For', html: (r) => esc((r.audience || []).join(', ')) },
+    { label: 'Shown from', key: 'publishAt', type: 'date' },
+    { label: 'Pinned', key: 'pinned', type: 'checkbox' }
+  ]
+});
+</script>
+</body>
+</html>

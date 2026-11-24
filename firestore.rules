@@ -1,0 +1,192 @@
+rules_version = '2';
+// Father Flower school system: Firestore security rules (integrator).
+// Roles come from users/{uid}.role. These rules enforce WHO can do WHAT.
+// Campus filtering is done in the pages; every signed-in role below is trusted within its job.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ---------- helpers ---------- */
+    function signedIn() { return request.auth != null; }
+    function hasProf() { return signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)); }
+    function prof() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+    function inR(roles) { return hasProf() && prof().get('active', true) == true && prof().role in roles; }
+    function isR(r) { return inR([r]); }
+    function isAdmin() { return isR('admin'); }
+    function mgmt() { return inR(['admin', 'head', 'deputy']); }
+    function staff() { return inR(['admin', 'head', 'deputy', 'sdc', 'bursar', 'boarding', 'teacher']); }
+    function learnerStaff() { return inR(['admin', 'head', 'deputy', 'bursar', 'boarding', 'teacher']); }
+    function learnerDoc(id) { return get(/databases/$(database)/documents/learners/$(id)).data; }
+    function isMyLearner(id) {
+      return exists(/databases/$(database)/documents/learners/$(id)) &&
+        ((isR('learner') && learnerDoc(id).userUid == request.auth.uid) ||
+         (isR('parent') && request.auth.uid in learnerDoc(id).get('guardianUids', [])));
+    }
+    function onlyKeys(keys) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys); }
+
+    /* ---------- public content ---------- */
+    match /settings/{id} { allow read: if true; allow write: if isAdmin(); }
+    match /campuses/{id} { allow read: if true; allow write: if isAdmin(); }
+    match /gallery/{id} { allow read: if true; allow write: if isAdmin(); }
+    match /feeStructures/{id} { allow read: if true; allow write: if inR(['admin', 'bursar']); }
+    match /news/{id} {
+      allow read: if resource.data.get('published', false) == true || mgmt();
+      allow write: if inR(['admin', 'head']);
+    }
+    match /messages/{id} {
+      allow create: if request.resource.data.keys().size() <= 15;
+      allow read, update, delete: if mgmt();
+    }
+    match /admissions/{id} {
+      allow create: if request.resource.data.get('status', '') == 'new' && request.resource.data.keys().size() <= 20;
+      allow read: if inR(['admin', 'head']);
+      allow update, delete: if isAdmin();
+    }
+    match /loginAliases/{id} { allow get: if true; allow list: if false; allow write: if isAdmin(); }
+
+    /* ---------- accounts and structure ---------- */
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || inR(['admin', 'head', 'deputy', 'bursar']));
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (request.auth.uid == uid && onlyKeys(['mustChangePassword', 'updatedAt', 'photoUrl', 'phone']));
+    }
+    match /terms/{id} { allow read: if signedIn(); allow write: if isAdmin(); }
+    match /classes/{id} { allow read: if signedIn(); allow write: if isAdmin(); }
+    match /subjects/{id} { allow read: if signedIn(); allow write: if isAdmin(); }
+    match /allocations/{id} { allow read: if staff(); allow write: if isAdmin(); }
+    match /timetables/{id} { allow read: if signedIn(); allow write: if inR(['admin', 'deputy']); }
+    match /examTimetables/{id} { allow read: if signedIn(); allow write: if inR(['admin', 'deputy']); }
+    match /invigilation/{id} { allow read: if staff(); allow write: if inR(['admin', 'deputy']); }
+    match /dutyRoster/{id} { allow read: if staff(); allow write: if inR(['admin', 'deputy']); }
+    match /staffLeave/{id} { allow read: if mgmt(); allow write: if inR(['admin', 'deputy']); }
+    match /auditLog/{id} {
+      allow create: if hasProf() && request.resource.data.actorUid == request.auth.uid;
+      allow read: if inR(['admin', 'head']);
+      allow update, delete: if false;
+    }
+    match /notices/{id} {
+      allow read: if staff()
+        || (isR('learner') && 'learner' in resource.data.audience)
+        || (isR('parent') && 'parent' in resource.data.audience)
+        || (signedIn() && request.auth.uid in resource.data.get('targetUids', []));
+      allow write: if inR(['admin', 'head', 'deputy', 'sdc', 'boarding', 'bursar']);
+    }
+
+    /* ---------- learners ---------- */
+    match /learners/{id} {
+      allow read: if learnerStaff()
+        || (isR('learner') && resource.data.userUid == request.auth.uid)
+        || (isR('parent') && request.auth.uid in resource.data.get('guardianUids', []));
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (isR('boarding') && onlyKeys(['hostelId', 'bedId', 'updatedAt', 'updatedBy']));
+    }
+    match /discipline/{id} {
+      allow read: if inR(['admin', 'head', 'deputy', 'boarding']);
+      allow write: if inR(['admin', 'deputy', 'boarding']);
+    }
+    match /attendance/{id} {
+      allow read: if inR(['admin', 'head', 'deputy', 'teacher', 'boarding', 'learner', 'parent']);
+      allow write: if inR(['admin', 'deputy', 'teacher']);
+    }
+
+    /* ---------- teaching ---------- */
+    match /assessments/{id} {
+      allow read: if inR(['admin', 'head', 'deputy', 'teacher', 'learner', 'parent']);
+      allow create: if isAdmin() || (isR('teacher') && request.resource.data.createdBy == request.auth.uid);
+      allow update, delete: if isAdmin() || (isR('teacher') && resource.data.createdBy == request.auth.uid);
+    }
+    match /marks/{id} {
+      allow read: if inR(['admin', 'head', 'deputy', 'teacher'])
+        || (isMyLearner(resource.data.learnerId)
+            && exists(/databases/$(database)/documents/reports/$(resource.data.termId + '_' + resource.data.learnerId))
+            && get(/databases/$(database)/documents/reports/$(resource.data.termId + '_' + resource.data.learnerId)).data.status == 'published');
+      allow create, update: if isAdmin() || (isR('teacher') && request.resource.data.enteredBy == request.auth.uid
+        && get(/databases/$(database)/documents/terms/$(request.resource.data.termId)).data.get('marksLocked', false) == false);
+      allow delete: if isAdmin();
+    }
+    match /reports/{id} {
+      allow read: if inR(['admin', 'head', 'deputy', 'teacher'])
+        || (resource.data.get('status', '') == 'published' && isMyLearner(resource.data.learnerId));
+      allow create: if isAdmin() || (isR('teacher') && request.resource.data.status == 'draft');
+      allow update: if isAdmin()
+        || (isR('head') && resource.data.status != 'published')
+        || (isR('teacher') && resource.data.status == 'draft' && request.resource.data.status == 'draft');
+      allow delete: if isAdmin();
+    }
+    match /assignments/{id} {
+      allow read: if inR(['admin', 'head', 'deputy', 'teacher', 'learner', 'parent']);
+      allow write: if isAdmin() || isR('teacher');
+    }
+    match /submissions/{id} {
+      allow read: if inR(['admin', 'head', 'teacher']) || (signedIn() && resource.data.get('learnerId', '') != '' && isMyLearner(resource.data.learnerId));
+      allow create, update: if isAdmin() || isR('teacher') || (isR('learner') && isMyLearner(request.resource.data.learnerId));
+      allow delete: if isAdmin() || isR('teacher');
+    }
+    match /materials/{id} {
+      allow read: if inR(['admin', 'head', 'deputy', 'teacher', 'learner', 'parent']);
+      allow write: if isAdmin() || isR('teacher');
+    }
+    match /quizzes/{id} {
+      allow read: if inR(['admin', 'head', 'deputy', 'teacher']) || (inR(['learner', 'parent']) && resource.data.get('status', '') == 'published');
+      allow write: if isAdmin() || isR('teacher');
+      match /questions/{qid} {
+        allow read: if inR(['admin', 'head', 'deputy', 'teacher', 'learner']);
+        allow write: if isAdmin() || isR('teacher');
+      }
+    }
+    match /quizAttempts/{id} {
+      allow read: if inR(['admin', 'head', 'teacher']) || (isR('learner') && resource.data.learnerId != null && isMyLearner(resource.data.learnerId));
+      allow create, update: if isAdmin() || isR('teacher') || (isR('learner') && isMyLearner(request.resource.data.learnerId));
+      allow delete: if isAdmin() || isR('teacher');
+    }
+
+    /* ---------- money ---------- */
+    match /accounts/{learnerId} {
+      allow read: if inR(['admin', 'head', 'bursar']) || isMyLearner(learnerId);
+      allow write: if inR(['admin', 'bursar']);
+    }
+    match /payments/{id} {
+      allow read: if inR(['admin', 'head', 'bursar']);
+      allow create, delete: if inR(['admin', 'bursar']);
+      allow update: if inR(['admin', 'bursar', 'head']);
+    }
+    match /financeSummary/{id} { allow read: if inR(['admin', 'head', 'bursar', 'sdc']); allow write: if inR(['admin', 'bursar']); }
+    match /levies/{id} { allow read: if inR(['admin', 'head', 'bursar', 'sdc']); allow write: if inR(['admin', 'bursar', 'sdc']); }
+    match /expenditures/{id} {
+      allow read: if inR(['admin', 'head', 'bursar', 'sdc']);
+      allow create: if inR(['admin', 'bursar']);
+      allow update: if inR(['admin', 'bursar', 'head', 'sdc']);
+      allow delete: if isAdmin();
+    }
+    match /budgets/{id} { allow read: if inR(['admin', 'head', 'bursar']); allow write: if inR(['admin', 'bursar']); }
+    match /suppliers/{id} { allow read, write: if inR(['admin', 'bursar']); }
+    match /pettyCash/{id} { allow read, write: if inR(['admin', 'bursar']); }
+    match /paymentPlans/{id} { allow read: if inR(['admin', 'head', 'bursar']); allow write: if inR(['admin', 'bursar']); }
+    match /cashups/{id} { allow read: if inR(['admin', 'head', 'bursar']); allow write: if inR(['admin', 'bursar']); }
+    match /counters/{id} { allow read, write: if inR(['admin', 'bursar']); }
+
+    /* ---------- SDC ---------- */
+    match /sdcMembers/{id} { allow read: if inR(['admin', 'head', 'sdc', 'bursar']); allow write: if inR(['admin', 'sdc']); }
+    match /sdcMeetings/{id} { allow read: if inR(['admin', 'head', 'sdc', 'bursar']); allow write: if inR(['admin', 'sdc']); }
+    match /sdcResolutions/{id} { allow read: if inR(['admin', 'head', 'sdc', 'bursar']); allow write: if inR(['admin', 'sdc']); }
+    match /sdcProjects/{id} { allow read: if inR(['admin', 'head', 'sdc', 'bursar']); allow write: if inR(['admin', 'sdc']); }
+
+    /* ---------- boarding ---------- */
+    match /hostels/{id} { allow read: if inR(['admin', 'head', 'deputy', 'bursar', 'boarding']); allow write: if inR(['admin', 'boarding']); }
+    match /hostelInventory/{id} { allow read, write: if inR(['admin', 'boarding']); }
+    match /prefects/{id} { allow read, write: if inR(['admin', 'boarding']); }
+    match /visits/{id} { allow read, write: if inR(['admin', 'boarding']); }
+    match /tuckAccounts/{id} { allow read, write: if inR(['admin', 'boarding']); }
+    match /diningMenu/{id} { allow read: if signedIn(); allow write: if inR(['admin', 'boarding']); }
+    match /boardingRegister/{id} { allow read: if inR(['admin', 'head', 'deputy', 'boarding']); allow write: if inR(['admin', 'boarding']); }
+    match /sickbay/{id} { allow read: if inR(['admin', 'head', 'boarding']); allow write: if inR(['admin', 'boarding']); }
+    match /exeats/{id} {
+      allow read: if inR(['admin', 'head', 'deputy', 'boarding'])
+        || (isR('parent') && (resource.data.get('requestedBy', '') == request.auth.uid || request.auth.uid in resource.data.get('guardianUids', [])));
+      allow create: if inR(['admin', 'boarding']) || (isR('parent') && request.resource.data.requestedBy == request.auth.uid && request.resource.data.status == 'requested');
+      allow update, delete: if inR(['admin', 'boarding']);
+    }
+
+    /* anything not listed above is closed */
+    match /{document=**} { allow read, write: if false; }
+  }
+}

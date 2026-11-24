@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Learners · Admin</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: add/edit learners, change status, promote a class, create learner + parent logins, upload photo. Role: admin.
+// Collections: learners, classes, campuses, users (read/create via createUserAccount), auditLog.
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, modal, confirmBox, renderShell, setLoading, printElement, saveFile } from '../shared/ui.js';
+import { ADMIN_NAV } from './js/nav.js';
+const $ = id => document.getElementById(id), col = n => fs.collection(db, n);
+const pw = () => { const c = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789', r = new Uint32Array(8); crypto.getRandomValues(r); return [...r].map(n => c[n % c.length]).join(''); };
+const ST = ['active','suspended','transferred','left'];
+const S = 'display:block;width:100%;min-height:44px;padding:8px;border:1px solid var(--line);border-radius:10px';
+A.requireRole(['admin'], async me => {
+  const main = renderShell({ role: 'admin', title: 'Learners', nav: ADMIN_NAV });
+  let camps = [], cls = [], rows = [], last = null, more = false;
+  try { [camps, cls] = await Promise.all(['campuses', 'classes'].map(async n => (await fs.getDocs(fs.query(col(n), fs.limit(300)))).docs.map(d => ({ id: d.id, ...d.data() })))); } catch (e) { console.error(e); }
+  const cn = id => camps.find(c => c.id === id)?.name || id, kn = id => cls.find(c => c.id === id)?.name || id;
+  const opt = (a, sel, f) => a.map(x => `<option value="${esc(x.id)}"${x.id === sel ? ' selected' : ''}>${esc(f(x))}</option>`).join('');
+  main.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+    <input id="q" placeholder="Search name or reg number" aria-label="Search" style="flex:1 1 180px;min-height:44px;padding:8px;border:1px solid var(--line);border-radius:10px">
+    <select id="fc" aria-label="Campus" style="min-height:44px"><option value="">All campuses</option>${opt(camps, '', c => c.name)}</select>
+    <select id="fk" aria-label="Class" style="min-height:44px"><option value="">All classes</option>${opt(cls, '', c => c.name)}</select>
+    <select id="fs" aria-label="Status" style="min-height:44px">${ST.map(s => `<option>${s}</option>`).join('')}</select>
+    <button id="add" class="btn btn-primary" style="min-height:44px">Add learner</button>
+    <button id="pro" class="btn" style="min-height:44px">Promote class</button></div><div id="list"></div><button id="more" class="btn" style="min-height:44px;margin-top:12px" hidden>Load more</button>`;
+  async function load(reset) {
+    if (reset) { rows = []; last = null; } setLoading($('list'), true);
+    try {
+      const cs = [col('learners'), fs.where('status', '==', $('fs').value)];
+      if ($('fc').value) cs.push(fs.where('campusId', '==', $('fc').value));
+      if ($('fk').value) cs.push(fs.where('classId', '==', $('fk').value));
+      if (last) cs.push(fs.startAfter(last)); cs.push(fs.limit(50));
+      const s = await fs.getDocs(fs.query(...cs)); s.docs.forEach(d => rows.push({ id: d.id, ...d.data() })); last = s.docs[s.docs.length - 1] || last; more = s.size === 50;
+    } catch (e) { console.error(e); $('list').innerHTML = `<p role="alert" style="color:var(--danger)">Could not load learners. Refresh and try again.</p>`; return; }
+    setLoading($('list'), false); draw();
+  }
+  function draw() {
+    const t = $('q').value.trim().toLowerCase(); $('more').hidden = !more;
+    const v = rows.filter(r => !t || (r.fullName || '').toLowerCase().includes(t) || (r.regNumber || '').toLowerCase().includes(t)).sort((a, b) => (a.fullName || '').localeCompare(b.fullName || ''));
+    $('list').innerHTML = v.length ? v.map(r => `<div class="card" style="padding:12px 16px;margin-bottom:8px;display:flex;gap:12px;align-items:center">
+      ${r.photoUrl ? `<img src="${esc(r.photoUrl)}" alt="" width="48" height="48" loading="lazy" style="border-radius:50%;object-fit:cover">` : ''}
+      <div style="flex:1"><strong>${esc(r.fullName)}</strong> <span style="color:var(--muted)">${esc(r.regNumber)}</span><div style="font-size:.9rem;color:var(--muted)">${esc(kn(r.classId))} · ${esc(cn(r.campusId))}${r.boarding ? ' · boarder' : ''} · ${esc(r.guardianName || 'no guardian')}</div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="btn" style="min-height:44px" data-a="edit" data-id="${esc(r.id)}">Edit</button><button class="btn" style="min-height:44px" data-a="status" data-id="${esc(r.id)}">Status</button></div></div></div>`).join('') : `<p>No learners found. Use “Add learner”.</p>`;
+  }
+  const slip = it => modal({ title: 'Credential slip', bodyHTML: `<div id="slip">${it.map(i => `<div style="border:1px dashed #999;padding:10px;margin-bottom:8px"><strong>${esc(i.fullName)}</strong> (${esc(i.role)})<br>ID: <b>${esc(i.loginId)}</b><br>Temporary password: <b>${esc(i.password)}</b></div>`).join('')}</div>`, actions: [{ label: 'Print', primary: true, onClick: () => { printElement($('slip')); return false; } }, { label: 'Close' }] });
+  const inp = (id, l, v = '', t = 'text', x = '') => `<label style="display:block;margin-bottom:10px">${esc(l)}<input id="${id}" type="${t}" value="${esc(v)}" ${x} style="${S}"></label>`;
+  function form(r = {}) {
+    const edit = !!r.id;
+    modal({ title: edit ? 'Edit learner' : 'Add learner', bodyHTML: inp('f-reg', 'Registration number', r.regNumber, 'text', edit ? 'disabled' : '') + inp('f-name', 'Full name', r.fullName) +
+      `<label style="display:block;margin-bottom:10px">Gender<select id="f-g" style="${S}">${['female', 'male'].map(g => `<option${g === r.gender ? ' selected' : ''}>${g}</option>`).join('')}</select></label>` + inp('f-dob', 'Date of birth', r.dob, 'date') +
+      `<label style="display:block;margin-bottom:10px">Campus<select id="f-c" style="${S}">${opt(camps, r.campusId, c => c.name)}</select></label><label style="display:block;margin-bottom:10px">Class<select id="f-k" style="${S}">${opt(cls, r.classId, c => c.name)}</select></label>
+      <label style="display:block;margin-bottom:10px"><input id="f-b" type="checkbox"${r.boarding ? ' checked' : ''}> Boarder</label>` + inp('f-gn', 'Guardian name', r.guardianName) + inp('f-gp', 'Guardian phone', r.guardianPhone, 'tel') + inp('f-ph', 'ID photo', '', 'file', 'accept="image/*"') +
+      (edit ? '' : `<label style="display:block"><input id="f-lg" type="checkbox" checked> Create learner login and parent login (if missing)</label>`),
+      actions: [{ label: 'Save', primary: true, onClick: async () => {
+        const reg = (edit ? r.regNumber : $('f-reg').value.trim()).toUpperCase(), k = cls.find(c => c.id === $('f-k').value);
+        const d = { regNumber: reg, fullName: $('f-name').value.trim(), gender: $('f-g').value, dob: $('f-dob').value, campusId: $('f-c').value, classId: $('f-k').value, form: k?.form ?? null, boarding: $('f-b').checked, guardianName: $('f-gn').value.trim(), guardianPhone: $('f-gp').value.trim() };
+        if (!/^[A-Z0-9]{3,20}$/.test(reg) || !d.fullName || !d.campusId || !d.classId || !d.dob) { toast('Enter a reg number, name, date of birth, campus and class.', 'error'); return false; }
+        try {
+          const f = $('f-ph').files[0]; if (f) d.photoUrl = (await saveFile(f, 'learners')).url;
+          if (edit) { await fs.updateDoc(fs.doc(db, 'learners', reg), { ...d, updatedAt: fs.serverTimestamp() }); await A.audit('learner.update', 'learners/' + reg, {}); }
+          else {
+            if ((await fs.getDoc(fs.doc(db, 'learners', reg))).exists()) { toast('That registration number already exists.', 'error'); return false; }
+            const slips = []; d.guardianUids = []; d.status = 'active'; d.hostelId = ''; d.bedId = '';
+            if ($('f-lg').checked) {
+              const lp = pw(); d.userUid = await A.createUserAccount({ loginId: reg, password: lp, fullName: d.fullName, role: 'learner', campusId: d.campusId, email: '', phone: '', extra: {} }); slips.push({ fullName: d.fullName, role: 'learner', loginId: reg, password: lp });
+              if (d.guardianName) { const pid = 'P' + reg.slice(1), ex = await fs.getDocs(fs.query(col('users'), fs.where('loginId', '==', pid), fs.limit(1)));
+                if (ex.empty) { const pp = pw(); d.guardianUids.push(await A.createUserAccount({ loginId: pid, password: pp, fullName: d.guardianName, role: 'parent', campusId: d.campusId, email: '', phone: d.guardianPhone, extra: {} })); slips.push({ fullName: d.guardianName, role: 'parent', loginId: pid, password: pp }); } else d.guardianUids.push(ex.docs[0].id); }
+            }
+            await fs.setDoc(fs.doc(db, 'learners', reg), { ...d, photoUrl: d.photoUrl || '', createdAt: fs.serverTimestamp(), createdBy: me.uid, updatedAt: fs.serverTimestamp() });
+            await A.audit('learner.create', 'learners/' + reg, {}); if (slips.length) setTimeout(() => slip(slips), 50);
+          }
+          toast('Saved', 'success'); load(true);
+        } catch (e) { console.error(e); toast(e.code === 'auth/email-already-in-use' ? 'A login with that ID already exists.' : 'Could not save. Try again.', 'error'); return false; }
+      } }, { label: 'Cancel' }] });
+  }
+  function promote() {
+    modal({ title: 'Promote class', bodyHTML: `<p>Moves every active learner from one class to another.</p><label style="display:block;margin-bottom:10px">From<select id="p-f" style="${S}">${opt(cls, '', c => c.name)}</select></label><label style="display:block">To<select id="p-t" style="${S}">${opt(cls, '', c => c.name)}</select></label>`,
+      actions: [{ label: 'Promote', primary: true, onClick: async () => {
+        const f = $('p-f').value, t = cls.find(c => c.id === $('p-t').value); if (!f || !t || f === t.id) { toast('Choose two different classes.', 'error'); return false; }
+        if (!await confirmBox(`Move all active learners from ${kn(f)} to ${t.name}?`)) return false;
+        try { const s = await fs.getDocs(fs.query(col('learners'), fs.where('classId', '==', f), fs.where('status', '==', 'active'), fs.limit(400))); const b = fs.writeBatch(db);
+          s.docs.forEach(d => b.update(d.ref, { classId: t.id, form: t.form ?? null, updatedAt: fs.serverTimestamp() })); await b.commit(); await A.audit('learner.promote', 'classes/' + f, { to: t.id, count: s.size }); toast(`${s.size} learners moved`, 'success'); load(true);
+        } catch (e) { console.error(e); toast('Could not promote the class.', 'error'); return false; }
+      } }, { label: 'Cancel' }] });
+  }
+  main.addEventListener('click', e => {
+    const b = e.target.closest('[data-a]'); if (!b) return; const r = rows.find(x => x.id === b.dataset.id); if (!r) return;
+    if (b.dataset.a === 'edit') form(r);
+    if (b.dataset.a === 'status') modal({ title: 'Change status', bodyHTML: `<label>Status<select id="s-v" style="${S}">${ST.map(s => `<option${s === r.status ? ' selected' : ''}>${s}</option>`).join('')}</select></label>`, actions: [{ label: 'Save', primary: true, onClick: async () => {
+      try { await fs.updateDoc(fs.doc(db, 'learners', r.id), { status: $('s-v').value, updatedAt: fs.serverTimestamp() }); await A.audit('learner.status', 'learners/' + r.id, { from: r.status, to: $('s-v').value }); toast('Updated', 'success'); load(true); } catch (x) { console.error(x); toast('Could not update.', 'error'); return false; } } }, { label: 'Cancel' }] });
+  });
+  $('add').onclick = () => form(); $('pro').onclick = promote; $('more').onclick = () => load(false); $('q').oninput = draw; ['fc', 'fk', 'fs'].forEach(i => $(i).onchange = () => load(true));
+  load(true);
+});
+</script></body></html>

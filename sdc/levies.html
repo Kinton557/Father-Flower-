@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Levies | SDC</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * sdc/levies.html
+ * Purpose: each levy, the amount collected so far, and what it funds. Totals only, no learner names.
+ * Role allowed: sdc, admin.
+ * Collections used: levies, terms (read).
+ */
+import { esc } from '../shared/ui.js';
+import { crudPage } from '../bursar/js/crud.js';
+import { SDC_NAV, loadTerms, termLabel, usd } from '../bursar/js/common.js';
+
+crudPage({
+  roles: ['sdc', 'admin'],
+  nav: SDC_NAV,
+  title: 'Levies',
+  intro: 'Update the collected amount from the bursar\'s totals. Individual learner payments are not shown here.',
+  collection: 'levies',
+  newLabel: 'Add levy',
+  empty: 'No levies yet.',
+  auditSave: true,
+  defaults: () => ({ status: 'active' }),
+  sort: (a, b) => (a.status === b.status ? (a.name || '').localeCompare(b.name || '') : a.status === 'active' ? -1 : 1),
+  fields: [
+    { key: 'name', label: 'Levy name', type: 'text', required: true, max: 100 },
+    { key: 'termId', label: 'Term', type: 'select', options: async () => (await loadTerms()).map((t) => ({ v: t.id, l: termLabel(t) })) },
+    { key: 'amountCents', label: 'Amount per learner (USD)', type: 'money' },
+    { key: 'targetCents', label: 'Target to collect (USD)', type: 'money' },
+    { key: 'collectedCents', label: 'Collected so far (USD)', type: 'money' },
+    { key: 'status', label: 'Status', type: 'select', required: true, options: [{ v: 'active', l: 'Active' }, { v: 'closed', l: 'Closed' }] },
+    { key: 'fundsText', label: 'What this levy funds', type: 'textarea', required: true, wide: true }
+  ],
+  columns: [
+    { label: 'Levy', html: (r) => `<strong>${esc(r.name)}</strong><br><small>${esc(r.fundsText || '')}</small>` },
+    { label: 'Per learner', type: 'money', key: 'amountCents' },
+    { label: 'Collected', type: 'money', key: 'collectedCents' },
+    { label: 'Target', html: (r) => (r.targetCents ? `${usd(r.targetCents)} (${Math.round(((r.collectedCents || 0) / r.targetCents) * 100)}%)` : 'None set') },
+    { label: 'Status', html: (r) => `<span class="b-tag ${r.status === 'active' ? 'ok' : ''}">${esc(r.status)}</span>` }
+  ],
+  validate: async (d) => { if (d.targetCents && d.collectedCents > d.targetCents * 3) throw new Error('The collected amount looks far too high. Please check it.'); },
+  summary: async (rows) => `<div class="b-cards"><div class="b-card"><div class="k">Total collected</div><div class="v">${usd(rows.reduce((s, r) => s + (r.collectedCents || 0), 0))}</div></div><div class="b-card"><div class="k">Active levies</div><div class="v">${rows.filter((r) => r.status === 'active').length}</div></div></div>`
+});
+</script>
+</body>
+</html>

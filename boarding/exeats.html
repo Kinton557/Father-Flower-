@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Exeats | Boarding</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * boarding/exeats.html
+ * Purpose: exeat requests (parents and staff), approval by boarding staff, logging out and in, and a notice to the
+ *          parent at every step.
+ * Role allowed: boarding, admin (approve and log); parent, teacher, deputy, head (request and view).
+ * Collections used: exeats, notices (write, audience ["parent"] with targetUids), learners (read), auditLog.
+ */
+import { requireRole, audit } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, confirmBox, renderShell } from '../shared/ui.js';
+import { BOARDING_NAV, campusScope, scopeWhere, askText, tsMillis, showErr } from '../bursar/js/common.js';
+
+const TYPES = [['day', 'Day exeat'], ['weekend', 'Weekend'], ['medical', 'Medical'], ['family', 'Family matter'], ['other', 'Other']];
+const STATUS = { requested: ['Requested', 'warn'], approved: ['Approved', 'ok'], out: ['Out of school', 'warn'], returned: ['Returned', 'ok'], rejected: ['Declined', 'bad'] };
+const fmtDT = (iso) => { if (!iso) return ''; const d = new Date(iso); return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }); };
+const localNow = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+
+requireRole(['boarding', 'admin', 'parent', 'teacher', 'deputy', 'head'], async (profile) => {
+  const role = profile.role;
+  const isParent = role === 'parent';
+  const isApprover = role === 'boarding' || role === 'admin';
+  const nav = isApprover ? BOARDING_NAV : [{ label: 'Exeats', href: 'exeats.html', icon: 'door' }, { label: 'My home', href: `../${role}/index.html`, icon: 'home' }];
+  const main = renderShell({ role, title: 'Exeats', nav });
+  main.innerHTML = `<div class="b-head"><h1>Exeats</h1></div>
+    <section class="b-panel"><h2 class="b-h2">Request an exeat</h2>
+      <form id="rf" class="b-form" novalidate>
+        ${isParent ? '<label>Child<select name="child" required></select></label>' : '<label>Learner reg number<input name="reg" required autocapitalize="characters" maxlength="20" placeholder="e.g. J0016"></label>'}
+        <label>Type<select name="type">${TYPES.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></label>
+        <label>Leaving on<input type="datetime-local" name="leave" required min="${localNow()}"></label>
+        <label>Back by<input type="datetime-local" name="back" required min="${localNow()}"></label>
+        <label class="b-wide">Reason<textarea name="reason" required maxlength="400" rows="3"></textarea></label>
+        <div class="b-actions b-wide"><button class="b-btn" type="submit">Send request</button></div>
+      </form></section>
+    <div class="b-filters"><label>Show<select id="f"><option value="open">Open (requested, approved, out)</option><option value="all">All</option>${Object.keys(STATUS).map((k) => `<option value="${k}">${STATUS[k][0]}</option>`).join('')}</select></label></div>
+    <div id="list"><div class="b-skel"></div></div>`;
+  const $ = (s) => main.querySelector(s);
+  let rows = [], children = [];
+
+  if (isParent) {
+    try {
+      const snap = await fs.getDocs(fs.query(fs.collection(db, 'learners'), fs.where('guardianUids', 'array-contains', profile.uid), fs.limit(20)));
+      children = snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((l) => l.boarding && (l.status || 'active') === 'active');
+    } catch (e) { showErr($('#list'), e); return; }
+    const sel = $('#rf').elements.child;
+    if (!children.length) { $('#rf').innerHTML = '<p class="b-empty">None of your children is registered as a boarder, so there is nothing to request.</p>'; }
+    else sel.innerHTML = children.map((c) => `<option value="${esc(c.id)}">${esc(c.fullName)}</option>`).join('');
+  }
+
+  async function notify(ex, title, body, batch) {
+    const ref = fs.doc(fs.collection(db, 'notices'));
+    batch.set(ref, { title, body, audience: ['direct'], campusId: ex.campusId, pinned: false, publishAt: new Date().toISOString(), targetUids: ex.guardianUids || [], learnerId: ex.learnerId, source: 'boarding', exeatId: ex.id,
+      createdAt: fs.serverTimestamp(), createdBy: profile.uid, updatedAt: fs.serverTimestamp() });
+  }
+
+  $('#rf').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const btn = f.querySelector('[type=submit]');
+    try {
+      const leave = f.leave.value, back = f.back.value, reason = f.reason.value.trim();
+      if (!leave || !back) throw new Error('Enter when the learner leaves and when they are due back.');
+      if (new Date(back) <= new Date(leave)) throw new Error('The return time must be after the leaving time.');
+      if (reason.length < 5) throw new Error('Please give a reason.');
+      btn.disabled = true;
+      let l;
+      if (isParent) {
+        l = children.find((c) => c.id === f.child.value);
+        if (!l) throw new Error('Choose a child.');
+      } else {
+        const id = f.reg.value.trim().toUpperCase();
+        const s = await fs.getDoc(fs.doc(db, 'learners', id));
+        if (!s.exists()) throw new Error(`No learner with reg number ${id}.`);
+        l = { id, ...s.data() };
+        if (!l.boarding) throw new Error(`${l.fullName} is not a boarder.`);
+        const sc = campusScope(profile);
+        if (sc && l.campusId !== sc) throw new Error('That learner belongs to another campus.');
+      }
+      const ref = fs.doc(fs.collection(db, 'exeats'));
+      const ex = { learnerId: l.id, learnerName: l.fullName, campusId: l.campusId, hostelId: l.hostelId || '', guardianUids: l.guardianUids || [], reason, type: f.type.value,
+        requestedBy: profile.uid, requestedByName: profile.fullName || '', requestedByRole: role, status: 'requested', leaveAt: new Date(leave).toISOString(), expectedReturn: new Date(back).toISOString(), outAt: null, returnedAt: null,
+        createdAt: fs.serverTimestamp(), createdBy: profile.uid, updatedAt: fs.serverTimestamp() };
+      const b = fs.writeBatch(db);
+      b.set(ref, ex);
+      if (!isParent) await notify({ ...ex, id: ref.id }, `Exeat requested for ${l.fullName}`, `An exeat (${f.type.value}) from ${fmtDT(ex.leaveAt)} to ${fmtDT(ex.expectedReturn)} was requested by ${profile.fullName || 'staff'}. Reason: ${reason}`, b);
+      await b.commit();
+      toast('Exeat request sent', 'success');
+      f.reset();
+      await load();
+    } catch (err) { toast(err.message || 'Could not send', 'error'); }
+    btn.disabled = false;
+  });
+
+  async function load() {
+    const list = $('#list');
+    list.innerHTML = '<div class="b-skel"></div>';
+    try {
+      const cons = isParent ? [fs.where('guardianUids', 'array-contains', profile.uid)] : scopeWhere(profile);
+      const snap = await fs.getDocs(fs.query(fs.collection(db, 'exeats'), ...cons, fs.limit(200)));
+      rows = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => tsMillis(b.createdAt) - tsMillis(a.createdAt));
+      render();
+    } catch (e) { showErr(list, e); }
+  }
+
+  function render() {
+    const f = $('#f').value;
+    const shown = rows.filter((r) => (f === 'all' ? true : f === 'open' ? ['requested', 'approved', 'out'].includes(r.status) : r.status === f));
+    const list = $('#list');
+    if (!shown.length) { list.innerHTML = '<div class="b-empty">No exeats to show.</div>'; return; }
+    list.innerHTML = `<table class="b-table stack"><thead><tr><th>Learner</th><th>Type and reason</th><th>Leaves</th><th>Back by</th><th>Status</th><th></th></tr></thead><tbody>
+      ${shown.map((r) => { const s = STATUS[r.status] || [r.status, '']; const late = r.status === 'out' && r.expectedReturn && r.expectedReturn < new Date().toISOString();
+        const acts = [];
+        if (isApprover) {
+          if (r.status === 'requested') acts.push(`<button class="b-btn" data-a="approved" data-id="${esc(r.id)}" type="button">Approve</button>`, `<button class="b-btn b-ghost" data-a="rejected" data-id="${esc(r.id)}" type="button">Decline</button>`);
+          if (r.status === 'approved') acts.push(`<button class="b-btn" data-a="out" data-id="${esc(r.id)}" type="button">Log out</button>`);
+          if (r.status === 'out') acts.push(`<button class="b-btn" data-a="returned" data-id="${esc(r.id)}" type="button">Log in</button>`);
+        }
+        return `<tr><td data-label="Learner">${esc(r.learnerName)}<br><small>${esc(r.learnerId)}</small></td><td data-label="Reason">${esc((TYPES.find((t) => t[0] === r.type) || [0, r.type])[1])}<br><small>${esc(r.reason)}</small><br><small>By ${esc(r.requestedByName || '')}</small></td>
+          <td data-label="Leaves">${esc(fmtDT(r.leaveAt))}${r.outAt ? `<br><small>Out ${esc(fmtDT(r.outAt))}</small>` : ''}</td><td data-label="Back by">${esc(fmtDT(r.expectedReturn))}${r.returnedAt ? `<br><small>In ${esc(fmtDT(r.returnedAt))}</small>` : ''}</td>
+          <td data-label="Status"><span class="b-tag ${s[1]}">${esc(s[0])}</span>${late ? ' <span class="b-tag bad">Overdue</span>' : ''}${r.decisionNote ? `<br><small>${esc(r.decisionNote)}</small>` : ''}</td>
+          <td><div class="b-actions" style="margin:0">${acts.join('')}</div></td></tr>`; }).join('')}</tbody></table>`;
+  }
+
+  const FLOW = { approved: ['requested'], rejected: ['requested'], out: ['approved'], returned: ['out'] };
+  const TEXT = {
+    approved: (r) => [`Exeat approved for ${r.learnerName}`, `The exeat for ${r.learnerName} has been approved. Leaving ${fmtDT(r.leaveAt)}, back by ${fmtDT(r.expectedReturn)}.`],
+    rejected: (r, n) => [`Exeat declined for ${r.learnerName}`, `The exeat request for ${r.learnerName} was not approved. ${n}`],
+    out: (r) => [`${r.learnerName} has left school`, `${r.learnerName} was signed out of the hostel at ${fmtDT(new Date().toISOString())}. Expected back by ${fmtDT(r.expectedReturn)}.`],
+    returned: (r) => [`${r.learnerName} is back at school`, `${r.learnerName} was signed back in at ${fmtDT(new Date().toISOString())}.`]
+  };
+
+  $('#list').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-a]');
+    if (!b) return;
+    const r = rows.find((x) => x.id === b.dataset.id);
+    const to = b.dataset.a;
+    let note = '';
+    if (to === 'rejected') { note = await askText({ title: `Decline exeat for ${r.learnerName}`, label: 'Reason (the parent will see this)', confirmText: 'Decline', danger: true, min: 5 }); if (note === null) return; }
+    else if (to === 'out' && !(await confirmBox(`Sign ${r.learnerName} out of the hostel now?`))) return;
+    else if (to === 'returned' && !(await confirmBox(`Sign ${r.learnerName} back in now?`))) return;
+    b.disabled = true;
+    try {
+      const ref = fs.doc(db, 'exeats', r.id);
+      const batch = fs.writeBatch(db);
+      // Re-check the current status so two staff cannot apply the same step twice.
+      const cur = await fs.getDoc(ref);
+      if (!cur.exists() || !FLOW[to].includes(cur.data().status)) throw new Error('This exeat has already moved on. Refreshing.');
+      const upd = { status: to, updatedAt: fs.serverTimestamp(), decisionBy: profile.uid, decisionByName: profile.fullName || '' };
+      if (note) upd.decisionNote = note;
+      if (to === 'out') upd.outAt = new Date().toISOString();
+      if (to === 'returned') upd.returnedAt = new Date().toISOString();
+      batch.update(ref, upd);
+      const [title, body] = TEXT[to](r, note);
+      await notify(r, title, body, batch);
+      await batch.commit();
+      if (to === 'approved' || to === 'rejected') await audit(`exeat.${to}`, `exeats/${r.id}`, { learnerId: r.learnerId, note });
+      toast('Updated and the parent has been notified', 'success');
+    } catch (err) { toast(err.message || 'Could not update', 'error'); }
+    load();
+  });
+  $('#f').addEventListener('change', render);
+  load();
+});
+</script>
+</body>
+</html>

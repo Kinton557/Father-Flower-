@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Settings · Admin</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: report-hold toggle, current term, roles overview, user list export (CSV). Role: admin.
+// Collections: settings/school, terms (read), users (read). Passwords are never stored, so the export has IDs only.
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell, setLoading } from '../shared/ui.js';
+import { ADMIN_NAV } from './js/nav.js';
+const $ = id => document.getElementById(id), col = n => fs.collection(db, n);
+const ROLES = ['admin','head','deputy','sdc','bursar','boarding','teacher','learner','parent'];
+A.requireRole(['admin'], async me => {
+  const main = renderShell({ role: 'admin', title: 'Settings', nav: ADMIN_NAV });
+  setLoading(main, true);
+  try {
+    const [sd, ts] = await Promise.all([fs.getDoc(fs.doc(db, 'settings', 'school')), fs.getDocs(fs.query(col('terms'), fs.limit(50)))]);
+    const s = sd.data() || {};
+    const counts = await Promise.all(ROLES.map(async r => { try { return (await fs.getCountFromServer(fs.query(col('users'), fs.where('role', '==', r)))).data().count; } catch { return (await fs.getDocs(fs.query(col('users'), fs.where('role', '==', r), fs.limit(1000)))).size; } }));
+    main.innerHTML = `<div class="card" style="padding:16px;margin-bottom:12px"><label><input id="hold" type="checkbox"${s.holdReportsIfOwing ? ' checked' : ''}> Hold report cards while fees are owing</label>
+      <label style="display:block;margin-top:12px">Current term<select id="ct" style="display:block;min-height:44px;width:100%"><option value="">None</option>${ts.docs.map(d => `<option value="${esc(d.id)}"${d.id === s.currentTermId ? ' selected' : ''}>${esc(d.data().year + ' Term ' + d.data().term)}</option>`).join('')}</select></label>
+      <button id="save" class="btn btn-primary" style="min-height:44px;margin-top:12px">Save settings</button></div>
+      <h2>Roles overview</h2>${ROLES.map((r, i) => `<div class="card" style="padding:10px 16px;margin-bottom:6px;display:flex;justify-content:space-between"><span>${r}</span><strong>${counts[i]}</strong></div>`).join('')}
+      <h2 style="margin-top:20px">Export</h2><p>Downloads login IDs, names, roles and campuses. Temporary passwords are only shown once on the credential slip.</p><button id="exp" class="btn" style="min-height:44px">Export users (CSV)</button>`;
+    $('save').onclick = async () => { try { await fs.setDoc(fs.doc(db, 'settings', 'school'), { holdReportsIfOwing: $('hold').checked, currentTermId: $('ct').value, updatedAt: fs.serverTimestamp() }, { merge: true }); await A.audit('settings.update', 'settings/school', { hold: $('hold').checked, term: $('ct').value }); toast('Saved', 'success'); } catch (e) { console.error(e); toast('Could not save.', 'error'); } };
+    $('exp').onclick = async () => {
+      try { const q = c => '"' + String(c ?? '').replace(/"/g, '""') + '"', rows = [['loginId','fullName','role','campusId','active']];
+        (await fs.getDocs(fs.query(col('users'), fs.limit(1000)))).forEach(d => { const u = d.data(); rows.push([u.loginId, u.fullName, u.role, u.campusId, u.active]); });
+        const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([rows.map(r => r.map(q).join(',')).join('\n')], { type: 'text/csv' })); a.download = 'users.csv'; a.click(); await A.audit('users.export', 'users', { count: rows.length - 1 });
+      } catch (e) { console.error(e); toast('Could not export.', 'error'); } };
+  } catch (e) { console.error(e); main.innerHTML = `<p role="alert" style="color:var(--danger)">Could not load settings. Refresh and try again.</p>`; }
+  setLoading(main, false);
+});
+</script></body></html>

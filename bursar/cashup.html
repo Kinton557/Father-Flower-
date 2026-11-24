@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Daily cash-up | Bursar</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="./css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * bursar/cashup.html
+ * Purpose: daily cash-up. Expected takings (from receipts) versus counted money, per method, with variance.
+ * Role allowed: bursar, admin (only admin can reopen a closed cash-up).
+ * Collections used: cashups (id = campusId_date), payments (read), campuses, auditLog.
+ */
+import { requireRole, audit } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, confirmBox, renderShell, fmtDate } from '../shared/ui.js';
+import { navFor, campusScope, loadCampuses, opts, toCents, usd, todayISO, printHTML, getSchool, METHODS, showErr } from './js/common.js';
+
+requireRole(['bursar', 'admin'], async (profile) => {
+  const main = renderShell({ role: profile.role, title: 'Cash-up', nav: navFor(profile.role) });
+  main.innerHTML = `<div class="b-head"><h1>Daily cash-up</h1></div>
+    <div class="b-filters"><label id="cw">Campus<select id="campus"></select></label><label>Date<input type="date" id="date" max="${todayISO()}"></label></div>
+    <section class="b-panel" id="sheet"><div class="b-skel"></div></section>
+    <section class="b-panel"><h2 class="b-h2">Recent cash-ups</h2><div id="recent"><div class="b-skel"></div></div></section>`;
+  const $ = (s) => main.querySelector(s);
+  let campuses = [], school = {};
+  try { [campuses, school] = await Promise.all([loadCampuses(profile), getSchool()]); } catch (e) { showErr($('#sheet'), e); return; }
+  if (!campuses.length) { $('#sheet').innerHTML = '<div class="b-empty">No campus found.</div>'; return; }
+  $('#campus').innerHTML = opts(campuses, (c) => c.id, (c) => c.name, campusScope(profile) || '');
+  if (campusScope(profile)) $('#cw').hidden = true;
+  $('#date').value = todayISO();
+  const campusName = (id) => (campuses.find((c) => c.id === id) || {}).name || id;
+  const keys = ['cash', 'ecocash', 'bank'];
+
+  async function loadSheet() {
+    const sheet = $('#sheet');
+    sheet.innerHTML = '<div class="b-skel"></div>';
+    try {
+      const campusId = $('#campus').value, date = $('#date').value;
+      if (!campusId || !date) return;
+      const [pSnap, cSnap] = await Promise.all([
+        fs.getDocs(fs.query(fs.collection(db, 'payments'), fs.where('campusId', '==', campusId), fs.where('paidOn', '==', date), fs.limit(500))),
+        fs.getDoc(fs.doc(db, 'cashups', `${campusId}_${date}`))
+      ]);
+      const exp = { cash: 0, ecocash: 0, bank: 0 };
+      let n = 0;
+      pSnap.docs.forEach((d) => { const p = d.data(); if (p.reversed) return; exp[p.method] = (exp[p.method] || 0) + p.amountCents; n++; });
+      const saved = cSnap.exists() ? cSnap.data() : null;
+      const closed = saved && saved.status === 'closed';
+      const counted = saved ? saved.counted : {};
+      sheet.innerHTML = `<h2 class="b-h2">${esc(campusName(campusId))}, ${esc(fmtDate(date))} <small>(${n} receipts)</small></h2>
+        ${closed ? `<p class="b-alert" role="status">Closed by ${esc(saved.preparedByName || '')}. ${profile.role === 'admin' ? 'You can reopen it.' : 'Ask an admin to reopen it if a correction is needed.'}</p>` : ''}
+        <form id="cf" novalidate><div style="overflow-x:auto"><table class="b-table"><thead><tr><th>Method</th><th class="b-num">Expected</th><th class="b-num">Counted</th><th class="b-num">Variance</th></tr></thead><tbody>
+        ${keys.map((k) => `<tr><td>${esc(METHODS[k])}</td><td class="b-num">${usd(exp[k])}</td><td class="b-num" style="width:150px"><input class="b-in" name="${k}" inputmode="decimal" placeholder="0.00" value="${counted && counted[k] !== undefined ? (counted[k] / 100).toFixed(2) : ''}" ${closed ? 'disabled' : ''} aria-label="Counted ${esc(METHODS[k])}"></td><td class="b-num" data-var="${k}"></td></tr>`).join('')}
+        <tr><th>Total</th><th class="b-num">${usd(keys.reduce((s, k) => s + exp[k], 0))}</th><th class="b-num" id="tc"></th><th class="b-num" id="tv"></th></tr></tbody></table></div>
+        <label style="display:flex;flex-direction:column;gap:4px;margin-top:12px;font-size:.85rem">Notes (explain any variance)<textarea class="b-in" name="notes" rows="3" maxlength="500" style="min-height:80px" ${closed ? 'disabled' : ''}>${esc(saved ? saved.notes || '' : '')}</textarea></label>
+        <div class="b-actions">${closed ? (profile.role === 'admin' ? '<button class="b-btn b-ghost" id="reopen" type="button">Reopen</button>' : '') : '<button class="b-btn" type="submit">Close the day</button>'}<button class="b-btn b-ghost" id="pr" type="button">Print</button></div></form>`;
+      const f = $('#cf');
+      const recalc = () => {
+        let tc = 0, tv = 0;
+        keys.forEach((k) => { const raw = f.elements[k].value.trim(); const c = toCents(raw); const v = raw === '' ? null : c - exp[k]; if (raw !== '') { tc += c; tv += v; } const cell = f.querySelector(`[data-var="${k}"]`); cell.textContent = v === null ? '' : usd(v); cell.className = 'b-num ' + (v ? (v < 0 ? 'b-pos' : 'b-neg') : ''); });
+        $('#tc').textContent = usd(tc); $('#tv').textContent = usd(tv); $('#tv').className = 'b-num ' + (tv < 0 ? 'b-pos' : '');
+      };
+      f.addEventListener('input', recalc); recalc();
+      $('#pr').addEventListener('click', () => {
+        const rows = keys.map((k) => { const c = toCents(f.elements[k].value); return `<tr><td>${esc(METHODS[k])}</td><td class="r">${usd(exp[k])}</td><td class="r">${usd(c)}</td><td class="r">${usd(c - exp[k])}</td></tr>`; }).join('');
+        printHTML(`<div class="rc"><div class="rc-top"><strong>${esc(school.name || '')}</strong><div>${esc(campusName(campusId))}</div></div><h2>Cash-up sheet, ${esc(date)}</h2>
+          <table class="st-t"><thead><tr><th>Method</th><th class="r">Expected</th><th class="r">Counted</th><th class="r">Variance</th></tr></thead><tbody>${rows}</tbody></table>
+          <p class="rc-sm">Notes: ${esc(f.elements.notes.value)}</p><div class="rc-sig">Prepared by: ${esc(profile.fullName || '')} ____________ &nbsp; Checked by: ____________</div></div>`, 'a4');
+      });
+      const re = $('#reopen');
+      if (re) re.addEventListener('click', async () => {
+        if (!(await confirmBox('Reopen this cash-up for correction?'))) return;
+        try { await fs.updateDoc(fs.doc(db, 'cashups', `${campusId}_${date}`), { status: 'open', updatedAt: fs.serverTimestamp() }); await audit('cashup.reopen', `cashups/${campusId}_${date}`, {}); toast('Reopened', 'success'); loadSheet(); loadRecent(); } catch (e) { toast(e.message, 'error'); }
+      });
+      f.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        if (closed) return;
+        for (const k of keys) if (f.elements[k].value.trim() === '') { toast(`Enter the counted amount for ${METHODS[k]} (0 if none).`, 'error'); return; }
+        const c = {}; keys.forEach((k) => { c[k] = toCents(f.elements[k].value); });
+        const totalV = keys.reduce((s, k) => s + c[k] - exp[k], 0);
+        if (totalV !== 0 && f.elements.notes.value.trim().length < 5) { toast('There is a variance. Please explain it in the notes.', 'error'); return; }
+        if (!(await confirmBox(`Close the day with a variance of ${usd(totalV)}?`))) return;
+        const btn = f.querySelector('[type=submit]'); btn.disabled = true;
+        try {
+          const id = `${campusId}_${date}`;
+          await fs.setDoc(fs.doc(db, 'cashups', id), { campusId, date, expected: exp, counted: c, varianceCents: totalV, receiptsCount: n, notes: f.elements.notes.value.trim(), status: 'closed', preparedBy: profile.uid, preparedByName: profile.fullName || '', createdAt: saved ? saved.createdAt : fs.serverTimestamp(), createdBy: saved ? saved.createdBy : profile.uid, updatedAt: fs.serverTimestamp() }, { merge: true });
+          await audit('cashup.close', `cashups/${id}`, { varianceCents: totalV });
+          toast('Cash-up saved', 'success'); loadSheet(); loadRecent();
+        } catch (e) { toast('Could not save: ' + (e.message || ''), 'error'); btn.disabled = false; }
+      });
+    } catch (e) { showErr(sheet, e); }
+  }
+
+  async function loadRecent() {
+    const out = $('#recent');
+    try {
+      const snap = await fs.getDocs(fs.query(fs.collection(db, 'cashups'), fs.where('campusId', '==', $('#campus').value), fs.limit(30)));
+      const rows = snap.docs.map((d) => d.data()).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+      out.innerHTML = rows.length ? `<table class="b-table stack"><thead><tr><th>Date</th><th class="b-num">Counted</th><th class="b-num">Variance</th><th>Status</th><th>By</th></tr></thead><tbody>${rows.map((r) => `<tr><td data-label="Date">${esc(fmtDate(r.date))}</td><td data-label="Counted" class="b-num">${usd(Object.values(r.counted || {}).reduce((s, v) => s + v, 0))}</td><td data-label="Variance" class="b-num ${r.varianceCents ? 'b-pos' : ''}">${usd(r.varianceCents)}</td><td data-label="Status"><span class="b-tag ${r.status === 'closed' ? 'ok' : 'warn'}">${esc(r.status)}</span></td><td data-label="By">${esc(r.preparedByName || '')}</td></tr>`).join('')}</tbody></table>` : '<div class="b-empty">No cash-ups yet.</div>';
+    } catch (e) { showErr(out, e); }
+  }
+  $('#campus').addEventListener('change', () => { loadSheet(); loadRecent(); });
+  $('#date').addEventListener('change', loadSheet);
+  loadSheet(); loadRecent();
+});
+</script>
+</body>
+</html>

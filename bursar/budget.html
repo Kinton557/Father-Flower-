@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Budget | Bursar</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="./css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * bursar/budget.html
+ * Purpose: yearly budget per category, compared with actual paid expenditure.
+ * Role allowed: bursar, admin.
+ * Collections used: budgets, expenditures (paid vouchers, read).
+ */
+import { db, fs } from '../shared/firebase.js';
+import { esc } from '../shared/ui.js';
+import { crudPage } from './js/crud.js';
+import { BURSAR_NAV, CATEGORIES, usd, scopeWhere, campusScope } from './js/common.js';
+
+const thisYear = new Date().getFullYear();
+
+crudPage({
+  roles: ['bursar', 'admin'],
+  nav: BURSAR_NAV,
+  title: 'Budget versus actual',
+  intro: 'Actual is the total of vouchers marked as paid, grouped by the year of the voucher date and its category.',
+  collection: 'budgets',
+  newLabel: 'Add budget line',
+  empty: 'No budget lines yet. Add one per category for the year.',
+  auditSave: true,
+  sort: (a, b) => (b.year - a.year) || (a.category || '').localeCompare(b.category || ''),
+  fields: [
+    { key: 'year', label: 'Year', type: 'number', required: true, min: 2020, max: 2100, default: thisYear },
+    { key: 'category', label: 'Category', type: 'select', required: true, options: CATEGORIES },
+    { key: 'budgetCents', label: 'Budget (USD)', type: 'money', required: true },
+    { key: 'notes', label: 'Notes', type: 'text', max: 200, wide: true }
+  ],
+  columns: [
+    { label: 'Year', key: 'year' }, { label: 'Category', key: 'category' },
+    { label: 'Budget', type: 'money', key: 'budgetCents' }, { label: 'Notes', key: 'notes' }
+  ],
+  validate: async (d, { existing, profile }) => {
+    const snap = await fs.getDocs(fs.query(fs.collection(db, 'budgets'), fs.where('campusId', '==', d.campusId), fs.where('year', '==', d.year), fs.where('category', '==', d.category), fs.limit(2)));
+    if (snap.docs.some((x) => !existing || x.id !== existing.id)) throw new Error('A budget line for this category and year already exists. Edit it instead.');
+  },
+  summary: async (rows, profile) => {
+    const snap = await fs.getDocs(fs.query(fs.collection(db, 'expenditures'), ...scopeWhere(profile), fs.where('status', '==', 'paid'), fs.limit(2000)));
+    const actual = {};
+    snap.docs.forEach((d) => { const e = d.data(); const k = `${String(e.date || '').slice(0, 4)}|${e.category}`; actual[k] = (actual[k] || 0) + (e.amountCents || 0); });
+    const budget = {};
+    rows.forEach((r) => { const k = `${r.year}|${r.category}`; budget[k] = (budget[k] || 0) + (r.budgetCents || 0); });
+    const keys = [...new Set([...Object.keys(budget), ...Object.keys(actual)])].filter((k) => budget[k] !== undefined || k.startsWith(String(thisYear)));
+    if (!keys.length) return '';
+    keys.sort((a, b) => b.localeCompare(a));
+    const tb = keys.reduce((s, k) => s + (budget[k] || 0), 0), ta = keys.reduce((s, k) => s + (actual[k] || 0), 0);
+    return `<section class="b-panel"><h2 class="b-h2">Budget versus actual</h2><div style="overflow-x:auto"><table class="b-table"><thead><tr><th>Year</th><th>Category</th><th class="b-num">Budget</th><th class="b-num">Actual</th><th class="b-num">Left</th><th>Used</th></tr></thead><tbody>
+      ${keys.map((k) => { const [y, c] = k.split('|'); const b = budget[k] || 0, a = actual[k] || 0; const pct = b ? Math.round((a / b) * 100) : (a ? 999 : 0);
+        return `<tr><td>${esc(y)}</td><td>${esc(c)}</td><td class="b-num">${usd(b)}</td><td class="b-num">${usd(a)}</td><td class="b-num ${b - a < 0 ? 'b-pos' : ''}">${usd(b - a)}</td><td>${b ? pct + '%' : 'No budget'} ${pct > 100 ? '<span class="b-tag bad">Over</span>' : ''}</td></tr>`; }).join('')}
+      <tr><th colspan="2">Total</th><th class="b-num">${usd(tb)}</th><th class="b-num">${usd(ta)}</th><th class="b-num">${usd(tb - ta)}</th><th></th></tr></tbody></table></div></section>`;
+  }
+});
+</script>
+</body>
+</html>

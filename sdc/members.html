@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SDC members | Father Flower</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * sdc/members.html
+ * Purpose: SDC committee members and their term of office.
+ * Role allowed: sdc, admin.
+ * Collections used: sdcMembers.
+ */
+import { esc } from '../shared/ui.js';
+import { crudPage } from '../bursar/js/crud.js';
+import { SDC_NAV } from '../bursar/js/common.js';
+
+crudPage({
+  roles: ['sdc', 'admin'],
+  nav: SDC_NAV,
+  title: 'Committee members',
+  collection: 'sdcMembers',
+  newLabel: 'Add member',
+  empty: 'No members added yet.',
+  auditSave: true,
+  sort: (a, b) => (a.fullName || '').localeCompare(b.fullName || ''),
+  fields: [
+    { key: 'fullName', label: 'Full name', type: 'text', required: true, max: 100 },
+    { key: 'role', label: 'Position', type: 'select', required: true, options: ['Chairperson', 'Vice chairperson', 'Secretary', 'Treasurer', 'Committee member', 'School head (ex officio)', 'Teacher representative', 'Co-opted member'] },
+    { key: 'phone', label: 'Phone', type: 'text', max: 30 },
+    { key: 'email', label: 'Email', type: 'text', max: 120 },
+    { key: 'electedOn', label: 'Elected on', type: 'date' },
+    { key: 'termEnds', label: 'Term of office ends', type: 'date' },
+    { key: 'active', label: 'Currently serving', type: 'checkbox', default: true }
+  ],
+  columns: [
+    { label: 'Name', key: 'fullName' }, { label: 'Position', key: 'role' },
+    { label: 'Contact', html: (r) => `${esc(r.phone || '')}<br><small>${esc(r.email || '')}</small>` },
+    { label: 'Term ends', key: 'termEnds', type: 'date' },
+    { label: 'Status', html: (r) => (r.active === false ? '<span class="b-tag">Former</span>' : '<span class="b-tag ok">Serving</span>') }
+  ],
+  validate: async (d) => {
+    if (d.electedOn && d.termEnds && d.termEnds < d.electedOn) throw new Error('The term cannot end before it starts.');
+    if (d.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email)) throw new Error('Enter a valid email address.');
+  }
+});
+</script>
+</body>
+</html>

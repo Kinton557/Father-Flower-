@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Website · Admin</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: manage news, gallery, notices and the settings/school content (contact details, logo, stamp, signature). Role: admin.
+// Collections: news, gallery, notices, campuses (read), settings/school. Uploads via saveFile().
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, modal, confirmBox, renderShell, setLoading, saveFile } from '../shared/ui.js';
+import { ADMIN_NAV } from './js/nav.js';
+const $ = id => document.getElementById(id), col = n => fs.collection(db, n);
+const S = 'display:block;width:100%;min-height:44px;padding:8px;border:1px solid var(--line);border-radius:10px';
+const ENT = {
+  news: { t: 'News', k: 'title', f: [['title','Title','text'],['summary','Summary','text'],['body','Article','textarea'],['imageUrl','Photo','image'],['campusId','Campus','campus'],['published','Published','bool']] },
+  gallery: { t: 'Gallery', k: 'caption', f: [['imageUrl','Photo','image'],['caption','Caption','text'],['campusId','Campus','campus'],['order','Order','number']] },
+  notices: { t: 'Notices', k: 'title', f: [['title','Title','text'],['body','Message','textarea'],['audience','Audience','multi',['parent','learner','teacher','staff']],['campusId','Campus','campus'],['pinned','Pinned','bool'],['publishAt','Publish on','date']] }
+};
+const SCHOOL = [['name','School name','text'],['shortName','Short name','text'],['tagline','Tagline','text'],['motto','Motto','textarea'],['vision','Vision','textarea'],['values','Core values (one per line)','lines'],['address','Address','textarea'],['phones','Phone numbers (one per line)','lines'],['email','Email','text'],['officeHours','Office hours','text'],['headName','Head / Director name','text'],['socials.facebook','Facebook link','text'],['socials.tiktok','TikTok link','text'],['socials.whatsapp','WhatsApp number','text'],['logoUrl','Logo','image'],['stampUrl','School stamp','image'],['headSignatureUrl','Head signature','image']];
+A.requireRole(['admin'], async me => {
+  const main = renderShell({ role: 'admin', title: 'Website', nav: ADMIN_NAV });
+  let tab = 'news', camps = [], rows = [];
+  try { camps = (await fs.getDocs(fs.query(col('campuses'), fs.limit(100)))).docs.map(d => ({ id: d.id, name: d.data().name })); } catch (e) { console.error(e); }
+  main.innerHTML = `<div id="tabs" style="display:flex;gap:6px;overflow-x:auto;margin-bottom:12px"></div><div id="body"></div>`;
+  const get = (o, p) => p.split('.').reduce((a, k) => a?.[k], o);
+  function input(k, l, t, v, s) {
+    const id = 'f-' + k.replace('.', '_'), lab = x => `<label style="display:block;margin-bottom:10px">${esc(l)}${x}</label>`;
+    if (t === 'bool') return `<label style="display:block;margin-bottom:10px"><input id="${id}" type="checkbox"${v ? ' checked' : ''}> ${esc(l)}</label>`;
+    if (t === 'textarea') return lab(`<textarea id="${id}" rows="4" style="${S}">${esc(v || '')}</textarea>`);
+    if (t === 'lines') return lab(`<textarea id="${id}" rows="4" style="${S}">${esc((v || []).join('\n'))}</textarea>`);
+    if (t === 'image') return lab(`${v ? `<img src="${esc(v)}" alt="" width="80" loading="lazy" style="display:block;margin:6px 0">` : ''}<input id="${id}" type="file" accept="image/*">`);
+    if (t === 'campus') return lab(`<select id="${id}" style="${S}"><option value="all">All campuses</option>${camps.map(c => `<option value="${esc(c.id)}"${c.id === v ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`);
+    if (t === 'multi') return lab(`<select id="${id}" multiple style="${S}">${s.map(o => `<option${(v || []).includes(o) ? ' selected' : ''}>${o}</option>`).join('')}</select>`);
+    return lab(`<input id="${id}" type="${t}" value="${esc(v ?? '')}" style="${S}">`);
+  }
+  async function read(fields, old) {
+    const d = {};
+    for (const [k, , t] of fields) {
+      const el = $('f-' + k.replace('.', '_')); let v;
+      if (t === 'bool') v = el.checked; else if (t === 'number') v = Number(el.value) || 0; else if (t === 'lines') v = el.value.split('\n').map(x => x.trim()).filter(Boolean);
+      else if (t === 'multi') v = [...el.selectedOptions].map(o => o.value); else if (t === 'image') v = el.files[0] ? (await saveFile(el.files[0], 'website')).url : (get(old, k) || '');
+      else v = el.value.trim();
+      if (k.includes('.')) { const [a, b] = k.split('.'); (d[a] ||= {})[b] = v; } else d[k] = v;
+    }
+    return d;
+  }
+  const drawTabs = () => $('tabs').innerHTML = [...Object.keys(ENT), 'school'].map(k => `<button class="btn${k === tab ? ' btn-primary' : ''}" style="min-height:44px;white-space:nowrap" data-t="${k}">${esc(ENT[k]?.t || 'School content')}</button>`).join('');
+  async function draw() {
+    drawTabs(); const body = $('body'); setLoading(body, true);
+    try {
+      if (tab === 'school') {
+        const s = (await fs.getDoc(fs.doc(db, 'settings', 'school'))).data() || {};
+        body.innerHTML = SCHOOL.map(([k, l, t]) => input(k, l, t, get(s, k))).join('') + `<button id="ss" class="btn btn-primary" style="min-height:44px">Save school content</button><p style="color:var(--muted)">The campus list is managed under Academic.</p>`;
+        $('ss').onclick = async () => { try { await fs.setDoc(fs.doc(db, 'settings', 'school'), { ...(await read(SCHOOL, s)), updatedAt: fs.serverTimestamp() }, { merge: true }); await A.audit('settings.school', 'settings/school', {}); toast('Saved', 'success'); } catch (x) { console.error(x); toast('Could not save.', 'error'); } };
+      } else {
+        rows = (await fs.getDocs(fs.query(col(tab), fs.limit(50)))).docs.map(d => ({ id: d.id, ...d.data() }));
+        body.innerHTML = `<button id="new" class="btn btn-primary" style="min-height:44px;margin-bottom:12px">Add</button>` + (rows.length ? rows.map(r => `<div class="card" style="padding:12px 16px;margin-bottom:8px"><strong>${esc(r[ENT[tab].k] || '(untitled)')}</strong> <span style="color:var(--muted)">${esc(r.campusId || '')}${r.published === false ? ' · draft' : ''}${r.pinned ? ' · pinned' : ''}</span><div style="display:flex;gap:8px;margin-top:8px"><button class="btn" style="min-height:44px" data-a="edit" data-id="${esc(r.id)}">Edit</button><button class="btn" style="min-height:44px" data-a="del" data-id="${esc(r.id)}">Delete</button></div></div>`).join('') : `<p>Nothing yet. Use “Add”.</p>`);
+        $('new').onclick = () => form();
+      }
+    } catch (e) { console.error(e); body.innerHTML = `<p role="alert" style="color:var(--danger)">Could not load. Refresh and try again.</p>`; }
+    setLoading(body, false);
+  }
+  function form(r = {}) {
+    const e = ENT[tab], edit = !!r.id;
+    modal({ title: (edit ? 'Edit ' : 'Add ') + e.t.toLowerCase(), bodyHTML: e.f.map(([k, l, t, s]) => input(k, l, t, r[k] ?? (t === 'campus' ? 'all' : ''), s)).join(''), actions: [{ label: 'Save', primary: true, onClick: async () => {
+      try {
+        const d = await read(e.f, r);
+        if (!(d[e.k] || (tab === 'gallery' && d.imageUrl))) { toast('Fill in the title or photo.', 'error'); return false; }
+        if (tab === 'gallery' && !d.imageUrl) { toast('Choose a photo.', 'error'); return false; }
+        if (tab === 'news' && d.published && !r.published) d.publishedAt = fs.serverTimestamp();
+        if (edit) await fs.updateDoc(fs.doc(db, tab, r.id), { ...d, updatedAt: fs.serverTimestamp() });
+        else await fs.addDoc(col(tab), { ...d, createdAt: fs.serverTimestamp(), createdBy: me.uid, updatedAt: fs.serverTimestamp() });
+        if (tab === 'news' && d.published !== !!r.published) await A.audit(d.published ? 'news.publish' : 'news.unpublish', 'news/' + (r.id || ''), {});
+        toast('Saved', 'success'); draw();
+      } catch (x) { console.error(x); toast('Could not save. Try again.', 'error'); return false; }
+    } }, { label: 'Cancel' }] });
+  }
+  main.addEventListener('click', async e => {
+    const t = e.target.closest('[data-t]'); if (t) { tab = t.dataset.t; return draw(); }
+    const b = e.target.closest('[data-a]'); if (!b) return; const r = rows.find(x => x.id === b.dataset.id);
+    if (b.dataset.a === 'edit') form(r);
+    if (b.dataset.a === 'del' && await confirmBox('Delete this item?')) { try { await fs.deleteDoc(fs.doc(db, tab, r.id)); await A.audit('delete.' + tab, tab + '/' + r.id, {}); toast('Deleted', 'success'); draw(); } catch (x) { console.error(x); toast('Could not delete.', 'error'); } }
+  });
+  draw();
+});
+</script></body></html>

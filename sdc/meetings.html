@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SDC meetings | Father Flower</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * sdc/meetings.html
+ * Purpose: SDC meetings with agenda, minutes and attendance. Minutes can be printed.
+ * Role allowed: sdc, admin.
+ * Collections used: sdcMeetings, sdcMembers (read, for attendance), settings/school.
+ */
+import { db, fs } from '../shared/firebase.js';
+import { esc } from '../shared/ui.js';
+import { crudPage } from '../bursar/js/crud.js';
+import { SDC_NAV, scopeWhere, printHTML, getSchool } from '../bursar/js/common.js';
+
+crudPage({
+  roles: ['sdc', 'admin'],
+  nav: SDC_NAV,
+  title: 'Meetings',
+  collection: 'sdcMeetings',
+  newLabel: 'Schedule meeting',
+  empty: 'No meetings yet.',
+  auditSave: true,
+  defaults: () => ({ status: 'scheduled' }),
+  sort: (a, b) => (b.date || '').localeCompare(a.date || ''),
+  fields: [
+    { key: 'title', label: 'Title', type: 'text', required: true, max: 120, default: 'SDC meeting' },
+    { key: 'date', label: 'Date', type: 'date', required: true },
+    { key: 'time', label: 'Time', type: 'time' },
+    { key: 'venue', label: 'Venue', type: 'text', max: 100 },
+    { key: 'status', label: 'Status', type: 'select', required: true, options: [{ v: 'scheduled', l: 'Scheduled' }, { v: 'held', l: 'Held' }, { v: 'cancelled', l: 'Cancelled' }] },
+    { key: 'agenda', label: 'Agenda (one item per line)', type: 'textarea', wide: true },
+    { key: 'attendance', label: 'Present', type: 'multi', wide: true,
+      options: async (p) => {
+        const s = await fs.getDocs(fs.query(fs.collection(db, 'sdcMembers'), ...scopeWhere(p), fs.limit(100)));
+        return s.docs.map((d) => d.data()).filter((m) => m.active !== false).map((m) => m.fullName).sort();
+      } },
+    { key: 'apologies', label: 'Apologies', type: 'text', max: 300, wide: true },
+    { key: 'minutes', label: 'Minutes', type: 'textarea', wide: true, max: 10000 }
+  ],
+  columns: [
+    { label: 'Meeting', html: (r) => `${esc(r.title)}<br><small>${esc(r.venue || '')}</small>` },
+    { label: 'Date', html: (r) => `${esc(r.date || '')} ${esc(r.time || '')}` },
+    { label: 'Status', html: (r) => `<span class="b-tag ${r.status === 'held' ? 'ok' : r.status === 'cancelled' ? 'bad' : 'warn'}">${esc(r.status)}</span>` },
+    { label: 'Present', html: (r) => String((r.attendance || []).length) },
+    { label: 'Minutes', html: (r) => (r.minutes ? 'Recorded' : '<span class="b-tag">None</span>') }
+  ],
+  validate: async (d) => { if (d.status === 'held' && !d.minutes) throw new Error('Add the minutes before marking a meeting as held.'); },
+  rowActions: [{ label: 'Print minutes', show: (r) => !!r.minutes || !!r.agenda,
+    run: async (r) => {
+      const school = await getSchool();
+      const lines = (t) => esc(t || '').split('\n').map((l) => `<p style="margin:4px 0">${l}</p>`).join('');
+      printHTML(`<div class="rc" style="max-width:none"><div class="rc-top"><strong>${esc(school.name || '')}</strong><div>School Development Committee</div></div><h2>${esc(r.title)}</h2>
+        <p class="rc-sm">${esc(r.date)} ${esc(r.time || '')} | ${esc(r.venue || '')}</p>
+        <h3>Present</h3><p>${esc((r.attendance || []).join(', ') || 'Not recorded')}</p>${r.apologies ? `<h3>Apologies</h3><p>${esc(r.apologies)}</p>` : ''}
+        <h3>Agenda</h3>${lines(r.agenda)}<h3>Minutes</h3>${lines(r.minutes)}
+        <div class="rc-sig">Chairperson: ____________________ &nbsp; Secretary: ____________________</div></div>`, 'a4');
+    } }]
+});
+</script>
+</body>
+</html>

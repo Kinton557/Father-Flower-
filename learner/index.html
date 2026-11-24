@@ -1,0 +1,35 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>My dashboard · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* learner/index.html — purpose: learner dashboard (open quizzes, assignments due, fees balance, notices). Role: learner.
+   Collections: learners, quizzes, assignments, accounts (read-only), notices */
+import { requireRole } from '../shared/auth.js';
+import { renderShell, esc, money, fmtDate } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, list, getMyLearner, toMs, noticesFor } from './js/common.js';
+const { where, doc, getDoc } = fs;
+requireRole(['learner'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'learner', title: 'My dashboard', nav: NAV });
+  main.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const l = await getMyLearner(p);
+    if (!l) { main.innerHTML = '<div class="tcard">Your learner record is not linked yet. Please see the school office.</div>'; return; }
+    const now = Date.now(), today = new Date().toISOString().slice(0, 10);
+    const [qz, as, acc, nt] = await Promise.all([
+      list('quizzes', where('classId', '==', l.classId), where('status', '==', 'published')),
+      list('assignments', where('classId', '==', l.classId)),
+      getDoc(doc(db, 'accounts', l.id)).catch(() => null), noticesFor('learner', l.campusId).catch(() => [])]);
+    const open = qz.filter(q => (toMs(q.opensAt) == null || toMs(q.opensAt) <= now) && (toMs(q.closesAt) == null || toMs(q.closesAt) >= now));
+    const due = as.filter(a => a.dueDate >= today).sort((a, b) => (a.dueDate < b.dueDate ? -1 : 1)).slice(0, 5);
+    const bal = acc && acc.exists() ? acc.data().balanceCents : null;
+    const li = (arr, f) => arr.map(f).join('') || '<p class="muted">Nothing right now.</p>';
+    main.innerHTML = `<h2>Hello, ${esc(l.fullName)}</h2><div class="tgrid">
+      <div class="tcard"><h3>Open quizzes</h3>${li(open, q => `<p><a href="quiz.html?id=${encodeURIComponent(q.id)}">${esc(q.title)}</a></p>`)}</div>
+      <div class="tcard"><h3>Assignments due</h3>${li(due, a => `<p><a href="assignments.html">${esc(a.title)}</a> <span class="muted">${esc(fmtDate(a.dueDate))}</span></p>`)}</div>
+      <div class="tcard"><h3>Fees balance</h3><div class="big">${bal == null ? '–' : esc(money(bal))}</div><div class="muted">Read only. See the bursar for payments.</div></div>
+      <div class="tcard"><h3>Latest results</h3><p><a class="tbtn alt" href="results.html">View my results</a></p></div></div>
+      <h2>Notices</h2>${li(nt.slice(0, 5), n => `<div class="tcard" style="margin-bottom:8px"><strong>${esc(n.title)}</strong><div class="muted">${esc(n.body)}</div></div>`)}`;
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load. Refresh and try again.</div>'; }
+});
+</script></body></html>

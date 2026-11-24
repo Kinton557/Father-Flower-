@@ -1,0 +1,83 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mark entry · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* teacher/marks.html — purpose: mark entry grid per assessment. Role: allocated teacher; admin.
+   Collections: allocations, assessments, learners, marks, terms. Local draft kept in localStorage. */
+import { requireRole, audit } from '../shared/auth.js';
+import { renderShell, esc, toast, setLoading } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, list, loadContext } from './js/common.js';
+const { doc, getDoc, writeBatch, serverTimestamp, where } = fs;
+requireRole(['teacher', 'admin'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'teacher', title: 'Mark entry', nav: NAV });
+  try {
+    const ctx = await loadContext(p);
+    main.innerHTML = `<div class="trow"><label>Class &amp; subject<select id="al"></select></label><label>Assessment<select id="as"></select></label></div><div id="g"><p class="muted">Choose an assessment.</p></div>`;
+    const $ = id => main.querySelector('#' + id);
+    $('al').innerHTML = ctx.allocations.map(a => `<option value="${esc(a.id)}">${esc(ctx.label(a))}</option>`).join('') || '<option value="">No allocations</option>';
+    let asms = [];
+    const al = () => ctx.allocations.find(a => a.id === $('al').value);
+    async function loadAsm(pref) {
+      const a = al(); if (!a) { $('as').innerHTML = ''; $('g').innerHTML = '<p class="muted">No allocations this term.</p>'; return; }
+      asms = (await list('assessments', where('allocationId', '==', a.id))).sort((x, y) => (x.date < y.date ? 1 : -1));
+      $('as').innerHTML = asms.map(x => `<option value="${esc(x.id)}">${esc(x.title)} (/${esc(x.outOf)})</option>`).join('') || '<option value="">No assessments</option>';
+      if (pref) $('as').value = pref;
+      showGrid();
+    }
+    async function showGrid() {
+      const a = al(), as = asms.find(x => x.id === $('as').value);
+      if (!a || !as) { $('g').innerHTML = '<p class="muted">No assessments yet. Create one on the Assessments page.</p>'; return; }
+      $('g').innerHTML = '<p class="muted">Loading learners…</p>';
+      try {
+        const [ls, ms] = await Promise.all([list('learners', where('classId', '==', a.classId), where('status', '==', 'active')), list('marks', where('assessmentId', '==', as.id))]);
+        ls.sort((x, y) => x.fullName.localeCompare(y.fullName));
+        const have = {}; ms.forEach(m => (have[m.learnerId] = m));
+        const locked = !!ctx.term?.marksLocked || (p.role === 'teacher' && a.teacherUid !== p.uid);
+        const key = 'ffmarks_' + as.id;
+        let draft = {}; try { draft = JSON.parse(localStorage.getItem(key) || '{}'); } catch (e) {}
+        $('g').innerHTML = `${locked ? '<div class="tcard" style="border-color:var(--warn)">Marks are locked or this is not your allocation. View only.</div>' : ''}
+        <table class="tbl"><thead><tr><th>Reg no.</th><th>Learner</th><th>Score / ${esc(as.outOf)}</th></tr></thead><tbody>${ls.map(l => {
+          const v = draft[l.id] ?? (have[l.id] ? have[l.id].score : '');
+          return `<tr><td data-l="Reg no.">${esc(l.regNumber)}</td><td data-l="Learner">${esc(l.fullName)}</td><td data-l="Score"><input class="tin sc" data-id="${esc(l.id)}" type="number" inputmode="decimal" min="0" max="${esc(as.outOf)}" step="any" value="${esc(v)}" ${locked ? 'disabled' : ''} aria-label="Score for ${esc(l.fullName)}" style="width:100px"></td></tr>`;
+        }).join('')}</tbody></table>
+        ${ls.length ? '' : '<p class="muted">No active learners in this class.</p>'}
+        ${locked ? '' : '<div class="trow"><button class="tbtn" id="sv">Save marks</button><span class="muted" id="st"></span></div>'}`;
+        const ins = [...$('g').querySelectorAll('.sc')];
+        const bad = i => { const v = i.value; const ok = v === '' || (Number(v) >= 0 && Number(v) <= as.outOf); i.classList.toggle('bad', !ok); return ok; };
+        ins.forEach((i, n) => {
+          i.oninput = () => { bad(i); const d = {}; ins.forEach(x => { if (x.value !== '') d[x.dataset.id] = x.value; }); try { localStorage.setItem(key, JSON.stringify(d)); } catch (e) {} const s = $('st'); if (s) s.textContent = 'Draft kept on this device'; };
+          i.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); (ins[n + 1] || i).focus(); } };
+        });
+        const sv = $('sv'); if (!sv) return;
+        sv.onclick = async () => {
+          if (ctx.term?.marksLocked) return toast('Marks are locked.', 'error');
+          if (!ins.every(bad)) return toast(`Scores must be between 0 and ${as.outOf}.`, 'error');
+          const todo = ins.filter(i => i.value !== '');
+          if (!todo.length) return toast('Nothing to save.', 'info');
+          setLoading(sv, true);
+          try {
+            let b = writeBatch(db), n = 0;
+            for (const i of todo) {
+              const id = i.dataset.id, ref = doc(db, 'marks', as.id + '_' + id);
+              const d = { assessmentId: as.id, learnerId: id, classId: as.classId, subjectId: as.subjectId, termId: as.termId, score: Number(i.value), enteredBy: p.uid, updatedAt: serverTimestamp() };
+              if (!have[id]) { d.createdAt = serverTimestamp(); d.createdBy = p.uid; }
+              b.set(ref, d, { merge: true });
+              if (++n >= 400) { await b.commit(); b = writeBatch(db); n = 0; }
+            }
+            if (n) await b.commit();
+            await audit('save_marks', 'assessments/' + as.id, { count: todo.length });
+            try { localStorage.removeItem(key); } catch (e) {}
+            toast(`${todo.length} marks saved`, 'success'); showGrid();
+          } catch (e) { console.error(e); toast('Save failed. Your draft is kept; try again.', 'error'); }
+          setLoading(sv, false);
+        };
+      } catch (e) { console.error(e); $('g').innerHTML = '<p class="muted">Could not load the grid. Refresh and try again.</p>'; }
+    }
+    $('al').onchange = () => loadAsm(); $('as').onchange = showGrid;
+    const qa = new URLSearchParams(location.search).get('a');
+    if (qa) { const s = await getDoc(doc(db, 'assessments', qa)); if (s.exists()) { $('al').value = s.data().allocationId; await loadAsm(qa); return; } }
+    loadAsm();
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load. Refresh and try again.</div>'; }
+});
+</script></body></html>

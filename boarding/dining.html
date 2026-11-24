@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dining | Boarding</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * boarding/dining.html
+ * Purpose: weekly dining menu per campus (shown on the parent portal and public site) and special diets.
+ * Role allowed: boarding, admin.
+ * Collections used: diningMenu (id = campusId_day), specialDiets, campuses, learners (lookup).
+ */
+import { requireRole } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell } from '../shared/ui.js';
+import { mountCrud } from '../bursar/js/crud.js';
+import { BOARDING_NAV, campusScope, loadCampuses, opts, tabs, showErr } from '../bursar/js/common.js';
+
+const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const MEALS = [['breakfast', 'Breakfast'], ['lunch', 'Lunch'], ['supper', 'Supper']];
+
+requireRole(['boarding', 'admin'], async (profile) => {
+  const main = renderShell({ role: profile.role, title: 'Dining', nav: BOARDING_NAV });
+  main.innerHTML = `<div class="b-head"><h1>Dining</h1></div>
+    <div class="b-tabs" role="tablist"><button data-tab="m" type="button" role="tab">Weekly menu</button><button data-tab="s" type="button" role="tab">Special diets</button></div>
+    <div data-panel="m"><div class="b-filters"><label id="cw">Campus<select id="campus"></select></label></div><div id="menu"><div class="b-skel"></div></div></div>
+    <div data-panel="s" hidden></div>`;
+  const $ = (s) => main.querySelector(s);
+  let campuses = [];
+  try { campuses = await loadCampuses(profile); } catch (e) { showErr($('#menu'), e); return; }
+  if (!campuses.length) { $('#menu').innerHTML = '<div class="b-empty">No campus found.</div>'; return; }
+  $('#campus').innerHTML = opts(campuses, (c) => c.id, (c) => c.name, campusScope(profile) || '');
+  if (campusScope(profile)) $('#cw').hidden = true;
+
+  async function loadMenu() {
+    const box = $('#menu');
+    box.innerHTML = '<div class="b-skel"></div>';
+    try {
+      const cid = $('#campus').value;
+      const snap = await fs.getDocs(fs.query(fs.collection(db, 'diningMenu'), fs.where('campusId', '==', cid), fs.limit(20)));
+      const m = {}; snap.docs.forEach((d) => { m[d.data().day] = d.data(); });
+      box.innerHTML = `<form id="mf"><div style="overflow-x:auto"><table class="b-table"><thead><tr><th>Day</th>${MEALS.map(([, t]) => `<th>${t}</th>`).join('')}</tr></thead><tbody>
+        ${DAYS.map((d) => `<tr><th scope="row">${d}</th>${MEALS.map(([k, t]) => `<td><input class="b-in" name="${d}_${k}" maxlength="120" aria-label="${d} ${t}" value="${esc((m[d] || {})[k] || '')}" style="min-width:160px"></td>`).join('')}</tr>`).join('')}</tbody></table></div>
+        <div class="b-actions"><button class="b-btn" type="submit">Save menu</button></div></form>`;
+      $('#mf').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const btn = e.target.querySelector('button'); btn.disabled = true;
+        try {
+          const b = fs.writeBatch(db);
+          DAYS.forEach((d, i) => {
+            const data = { campusId: cid, day: d, order: i + 1, updatedAt: fs.serverTimestamp() };
+            MEALS.forEach(([k]) => { data[k] = e.target.elements[`${d}_${k}`].value.trim(); });
+            if (!m[d]) { data.createdAt = fs.serverTimestamp(); data.createdBy = profile.uid; }
+            b.set(fs.doc(db, 'diningMenu', `${cid}_${d}`), data, { merge: true });
+          });
+          await b.commit();
+          toast('Menu saved', 'success');
+        } catch (err) { toast('Could not save: ' + (err.message || ''), 'error'); }
+        btn.disabled = false;
+      });
+    } catch (e) { showErr(box, e); }
+  }
+  $('#campus').addEventListener('change', loadMenu);
+
+  let diets = false;
+  tabs(main, (n) => {
+    if (n === 'm') loadMenu();
+    if (n === 's' && !diets) {
+      diets = true;
+      mountCrud($('[data-panel="s"]'), {
+        collection: 'specialDiets', newLabel: 'Add special diet', empty: 'No special diets recorded.',
+        fields: [
+          { key: 'learnerId', label: 'Learner reg number', type: 'learner', required: true, boarderOnly: true },
+          { key: 'diet', label: 'Diet', type: 'select', required: true, options: ['Vegetarian', 'Halal', 'Allergy', 'Diabetic', 'Lactose free', 'Other'] },
+          { key: 'details', label: 'Details (what to avoid or give instead)', type: 'textarea', required: true, wide: true }
+        ],
+        columns: [
+          { label: 'Learner', html: (r) => `${esc(r.learnerName || '')}<br><small>${esc(r.learnerId)}</small>` },
+          { label: 'Diet', key: 'diet' }, { label: 'Details', html: (r) => esc(r.details || '') }
+        ]
+      }, profile).catch((e) => showErr($('[data-panel="s"]'), e));
+    }
+  })('m');
+});
+</script>
+</body>
+</html>

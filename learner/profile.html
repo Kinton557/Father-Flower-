@@ -1,0 +1,28 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>My profile · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* learner/profile.html — purpose: view profile and change password. Role: learner. Collections: learners */
+import { requireRole, changePassword, audit } from '../shared/auth.js';
+import { renderShell, esc, toast, setLoading } from '../shared/ui.js';
+import { NAV, injectStyles, getMyLearner } from './js/common.js';
+requireRole(['learner'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'learner', title: 'My profile', nav: NAV });
+  let l = null; try { l = await getMyLearner(p); } catch (e) { console.error(e); }
+  main.innerHTML = `<div class="tcard"><h3>${esc(p.fullName)}</h3><p class="muted">ID: ${esc(p.loginId)}${l ? ' · Class details: reg ' + esc(l.regNumber) + ', form ' + esc(l.form) : ''}</p></div>
+  <form id="f" class="tcard" style="margin-top:12px" novalidate><h3>Change password</h3><div class="trow">
+  <label>New password<input id="a" type="password" autocomplete="new-password" minlength="8" required></label>
+  <label>Repeat password<input id="b" type="password" autocomplete="new-password" required></label></div>
+  <button class="tbtn" id="go">Change password</button></form>`;
+  const $ = id => main.querySelector('#' + id);
+  $('f').onsubmit = async e => {
+    e.preventDefault();
+    if ($('a').value.length < 8) return toast('Use at least 8 characters.', 'error');
+    if ($('a').value !== $('b').value) return toast('The passwords do not match.', 'error');
+    setLoading($('go'), true);
+    try { await changePassword($('a').value); await audit('change_password', 'users/' + p.uid, {}); toast('Password changed', 'success'); $('f').reset(); }
+    catch (err) { console.error(err); toast('Could not change it. Sign in again and retry.', 'error'); }
+    setLoading($('go'), false);
+  };
+});
+</script></body></html>

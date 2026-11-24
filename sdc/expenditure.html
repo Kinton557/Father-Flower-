@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Expenditure approvals | SDC</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * sdc/expenditure.html
+ * Purpose: approve or decline the bursar's spending requests, and leave comments.
+ * Role allowed: sdc, admin.
+ * Collections used: expenditures (status, sdcComment, sdcComments only), auditLog.
+ */
+import { requireRole, audit } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell, fmtDate } from '../shared/ui.js';
+import { SDC_NAV, scopeWhere, askText, usd, showErr } from '../bursar/js/common.js';
+
+const STATUS = { requested: ['Waiting for you', 'warn'], sdc_approved: ['You approved', 'ok'], sdc_rejected: ['You declined', 'bad'], head_approved: ['Head approved', 'ok'], head_rejected: ['Head declined', 'bad'], paid: ['Paid', 'ok'] };
+
+requireRole(['sdc', 'admin'], async (profile) => {
+  const main = renderShell({ role: profile.role, title: 'Expenditure approvals', nav: SDC_NAV });
+  main.innerHTML = `<div class="b-head"><h1>Expenditure approvals</h1></div>
+    <div class="b-filters"><label>Show<select id="f"><option value="requested">Waiting for approval</option><option value="all">Everything</option></select></label></div>
+    <div id="sum"></div><div id="list"><div class="b-skel"></div></div>`;
+  const $ = (s) => main.querySelector(s);
+  let rows = [];
+
+  async function load() {
+    $('#list').innerHTML = '<div class="b-skel"></div>';
+    try {
+      const snap = await fs.getDocs(fs.query(fs.collection(db, 'expenditures'), ...scopeWhere(profile), fs.limit(200)));
+      rows = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+      render();
+    } catch (e) { showErr($('#list'), e); }
+  }
+
+  function render() {
+    const waiting = rows.filter((r) => r.status === 'requested');
+    $('#sum').innerHTML = `<div class="b-cards"><div class="b-card"><div class="k">Waiting for approval</div><div class="v">${waiting.length}</div><div class="n">${usd(waiting.reduce((s, r) => s + (r.amountCents || 0), 0))}</div></div></div>`;
+    const shown = $('#f').value === 'all' ? rows : waiting;
+    if (!shown.length) { $('#list').innerHTML = '<div class="b-empty">Nothing waiting for your approval.</div>'; return; }
+    $('#list').innerHTML = shown.map((r) => { const s = STATUS[r.status] || [r.status, '']; return `<article class="b-card" style="margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><strong>${esc(r.supplierName || '')}</strong><span class="b-tag ${s[1]}">${esc(s[0])}</span></div>
+      <div class="v">${usd(r.amountCents)}</div>
+      <p style="margin:6px 0">${esc(r.description || '')}</p>
+      <small>${esc(r.category || '')} | Voucher ${esc(r.voucherNumber || '')} | ${esc(fmtDate(r.date))}</small>
+      ${(r.sdcComments || []).length ? `<ul style="padding-left:18px;margin:10px 0">${r.sdcComments.map((c) => `<li><strong>${esc(c.byName || '')}</strong>: ${esc(c.text)} <small>${esc(fmtDate(c.at))}</small></li>`).join('')}</ul>` : ''}
+      <div class="b-actions">${r.status === 'requested' ? `<button class="b-btn" data-a="sdc_approved" data-id="${esc(r.id)}" type="button">Approve</button><button class="b-btn b-danger" data-a="sdc_rejected" data-id="${esc(r.id)}" type="button">Decline</button>` : ''}<button class="b-btn b-ghost" data-a="comment" data-id="${esc(r.id)}" type="button">Add comment</button></div></article>`; }).join('');
+  }
+
+  $('#list').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-a]');
+    if (!b) return;
+    const r = rows.find((x) => x.id === b.dataset.id);
+    const a = b.dataset.a;
+    const note = await askText({ title: a === 'comment' ? `Comment on ${r.voucherNumber || 'voucher'}` : `${a === 'sdc_approved' ? 'Approve' : 'Decline'} ${usd(r.amountCents)} to ${r.supplierName}`,
+      label: a === 'comment' ? 'Your comment' : 'Comment (required, the bursar will see it)', confirmText: a === 'comment' ? 'Post comment' : (a === 'sdc_approved' ? 'Approve' : 'Decline'), danger: a === 'sdc_rejected', min: 5 });
+    if (note === null) return;
+    b.disabled = true;
+    const comment = { by: profile.uid, byName: profile.fullName || '', text: note, at: new Date().toISOString() };
+    try {
+      const ref = fs.doc(db, 'expenditures', r.id);
+      if (a === 'comment') {
+        await fs.updateDoc(ref, { sdcComments: fs.arrayUnion(comment), updatedAt: fs.serverTimestamp() });
+      } else {
+        await fs.runTransaction(db, async (tx) => {
+          const s = await tx.get(ref);
+          if (!s.exists() || s.data().status !== 'requested') throw new Error('This request was already decided.');
+          tx.update(ref, { status: a, sdcComment: note, sdcDecidedBy: profile.uid, sdcDecidedByName: profile.fullName || '', sdcDecidedAt: fs.serverTimestamp(), sdcComments: fs.arrayUnion(comment), updatedAt: fs.serverTimestamp() });
+        });
+        await audit(a === 'sdc_approved' ? 'expenditure.sdcApproved' : 'expenditure.sdcDeclined', `expenditures/${r.id}`, { amountCents: r.amountCents, note });
+      }
+      toast('Saved', 'success');
+    } catch (err) { toast(err.message || 'Could not save', 'error'); }
+    load();
+  });
+  $('#f').addEventListener('change', render);
+  load();
+});
+</script>
+</body>
+</html>

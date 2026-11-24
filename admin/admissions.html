@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Admissions · Admin</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: review applications, change status, accept and enrol (creates learner + optional logins). Role: admin.
+// Collections: admissions, classes, learners (create), users (create via createUserAccount).
+// Assumes applicant{fullName,gender,dob} and guardian{fullName,phone} as written by the public form.
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, modal, renderShell, setLoading, printElement } from '../shared/ui.js';
+import { ADMIN_NAV } from './js/nav.js';
+const $ = id => document.getElementById(id), col = n => fs.collection(db, n);
+const S = 'display:block;width:100%;min-height:44px;padding:8px;border:1px solid var(--line);border-radius:10px';
+const pw = () => { const c = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789', r = new Uint32Array(8); crypto.getRandomValues(r); return [...r].map(n => c[n % c.length]).join(''); };
+const ST = ['new', 'reviewing', 'accepted', 'rejected', 'enrolled'];
+A.requireRole(['admin'], async me => {
+  const main = renderShell({ role: 'admin', title: 'Admissions', nav: ADMIN_NAV });
+  let rows = [], last = null, more = false, cls = [];
+  try { cls = (await fs.getDocs(fs.query(col('classes'), fs.limit(300)))).docs.map(d => ({ id: d.id, ...d.data() })); } catch (e) { console.error(e); }
+  main.innerHTML = `<select id="st" aria-label="Status" style="min-height:44px;margin-bottom:12px">${ST.map(s => `<option>${s}</option>`).join('')}</select><div id="list"></div><button id="more" class="btn" style="min-height:44px;margin-top:12px" hidden>Load more</button>`;
+  async function load(reset) {
+    if (reset) { rows = []; last = null; } setLoading($('list'), true);
+    try { const cs = [col('admissions'), fs.where('status', '==', $('st').value)]; if (last) cs.push(fs.startAfter(last)); cs.push(fs.limit(50));
+      const s = await fs.getDocs(fs.query(...cs)); s.docs.forEach(d => rows.push({ id: d.id, ...d.data() })); last = s.docs[s.docs.length - 1] || last; more = s.size === 50;
+    } catch (e) { console.error(e); $('list').innerHTML = `<p role="alert" style="color:var(--danger)">Could not load applications.</p>`; return; }
+    setLoading($('list'), false); $('more').hidden = !more;
+    $('list').innerHTML = rows.length ? rows.map(r => `<div class="card" style="padding:12px 16px;margin-bottom:8px"><strong>${esc(r.applicant?.fullName)}</strong> <span style="color:var(--muted)">Form ${esc(r.formApplyingFor)} · ${esc(r.campusId)}</span><div style="font-size:.9rem">Guardian: ${esc(r.guardian?.fullName)} ${esc(r.guardian?.phone)}</div><button class="btn" style="min-height:44px;margin-top:8px" data-id="${esc(r.id)}">Open</button></div>`).join('') : `<p>No ${esc($('st').value)} applications.</p>`;
+  }
+  const slip = it => modal({ title: 'Credential slip', bodyHTML: `<div id="slip">${it.map(i => `<div style="border:1px dashed #999;padding:10px;margin-bottom:8px"><strong>${esc(i.fullName)}</strong> (${esc(i.role)})<br>ID: <b>${esc(i.loginId)}</b><br>Temporary password: <b>${esc(i.password)}</b></div>`).join('')}</div>`, actions: [{ label: 'Print', primary: true, onClick: () => { printElement($('slip')); return false; } }, { label: 'Close' }] });
+  async function setStatus(r, status, extra = {}) { await fs.updateDoc(fs.doc(db, 'admissions', r.id), { status, ...extra, updatedAt: fs.serverTimestamp() }); await A.audit('admission.' + status, 'admissions/' + r.id, {}); }
+  function enrol(r) {
+    const opts = cls.filter(c => c.campusId === r.campusId);
+    modal({ title: 'Enrol learner', bodyHTML: `<label style="display:block;margin-bottom:10px">Registration number<input id="e-reg" style="${S}"></label><label style="display:block;margin-bottom:10px">Class<select id="e-k" style="${S}">${opts.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select></label><label><input id="e-lg" type="checkbox" checked> Create learner and parent logins</label>`, actions: [{ label: 'Enrol', primary: true, onClick: async () => {
+      const reg = $('e-reg').value.trim().toUpperCase(), k = cls.find(c => c.id === $('e-k').value), a = r.applicant || {}, g = r.guardian || {};
+      if (!/^[A-Z0-9]{3,20}$/.test(reg) || !k) { toast('Enter a reg number and choose a class (add classes for this campus first).', 'error'); return false; }
+      try {
+        if ((await fs.getDoc(fs.doc(db, 'learners', reg))).exists()) { toast('That registration number exists.', 'error'); return false; }
+        const slips = [], d = { regNumber: reg, fullName: a.fullName || '', gender: a.gender || '', dob: a.dob || '', campusId: r.campusId, classId: k.id, form: k.form ?? null, boarding: !!(r.boarding ?? (r.applicant || {}).boarding), hostelId: '', bedId: '', guardianUids: [], guardianName: (g.fullName || g.name) || '', guardianPhone: g.phone || '', status: 'active', photoUrl: '' };
+        if ($('e-lg').checked) {
+          const lp = pw(); d.userUid = await A.createUserAccount({ loginId: reg, password: lp, fullName: d.fullName, role: 'learner', campusId: d.campusId, email: '', phone: '', extra: {} }); slips.push({ fullName: d.fullName, role: 'learner', loginId: reg, password: lp });
+          const pid = 'P' + reg.slice(1), ex = await fs.getDocs(fs.query(col('users'), fs.where('loginId', '==', pid), fs.limit(1)));
+          if (ex.empty) { const pp = pw(); d.guardianUids.push(await A.createUserAccount({ loginId: pid, password: pp, fullName: d.guardianName || 'Parent', role: 'parent', campusId: d.campusId, email: g.email || '', phone: d.guardianPhone, extra: {} })); slips.push({ fullName: d.guardianName || 'Parent', role: 'parent', loginId: pid, password: pp }); } else d.guardianUids.push(ex.docs[0].id);
+        }
+        await fs.setDoc(fs.doc(db, 'learners', reg), { ...d, createdAt: fs.serverTimestamp(), createdBy: me.uid, updatedAt: fs.serverTimestamp() });
+        await setStatus(r, 'enrolled'); await A.audit('learner.create', 'learners/' + reg, { from: 'admissions/' + r.id }); toast('Learner enrolled', 'success'); load(true); if (slips.length) setTimeout(() => slip(slips), 50);
+      } catch (e) { console.error(e); toast('Could not enrol. Try again.', 'error'); return false; }
+    } }, { label: 'Cancel' }] });
+  }
+  main.addEventListener('click', e => {
+    const b = e.target.closest('[data-id]'); if (!b) return; const r = rows.find(x => x.id === b.dataset.id); if (!r) return;
+    const a = r.applicant || {}, g = r.guardian || {}, acts = { new: ['reviewing'], reviewing: ['accepted', 'rejected'], accepted: ['enrolled'], rejected: ['reviewing'], enrolled: [] }[r.status] || [];
+    modal({ title: a.fullName || 'Application', bodyHTML: `<p>Gender ${esc(a.gender)} · born ${esc(a.dob)}<br>Applying for form ${esc(r.formApplyingFor)}, ${esc(r.campusId)}${(r.boarding ?? (r.applicant || {}).boarding) ? ', boarding' : ''}<br>Guardian ${esc((g.fullName || g.name))}, ${esc(g.phone)}</p>${(r.documents || []).map((u, i) => `<a href="${esc(u.url || u)}" target="_blank" rel="noopener">Document ${i + 1}</a>`).join(' · ')}<label style="display:block;margin-top:10px">Notes<textarea id="n" rows="3" style="${S}">${esc(r.notes || '')}</textarea></label>`,
+      actions: [...acts.map(s => ({ label: s === 'enrolled' ? 'Enrol…' : 'Mark ' + s, primary: s !== 'rejected', onClick: async () => { try { if (s === 'enrolled') { setTimeout(() => enrol(r), 50); return; } await setStatus(r, s, { notes: $('n').value.trim() }); toast('Updated', 'success'); load(true); } catch (x) { console.error(x); toast('Could not update.', 'error'); return false; } } })), { label: 'Close' }] });
+  });
+  $('st').onchange = () => load(true); $('more').onclick = () => load(false); load(true);
+});
+</script></body></html>

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tuck shop | Boarding</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * boarding/tuckshop.html
+ * Purpose: tuck or pocket-money balance per boarder, with top-ups and spending. Each change is one transaction.
+ * Role allowed: boarding, admin.
+ * Collections used: tuckAccounts (id = learnerId), tuckAccounts/{id}/transactions, learners (lookup).
+ */
+import { requireRole } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell, fmtDate } from '../shared/ui.js';
+import { BOARDING_NAV, scopeWhere, campusScope, toCents, usd, todayISO, tsMillis, showErr } from '../bursar/js/common.js';
+
+requireRole(['boarding', 'admin'], async (profile) => {
+  const main = renderShell({ role: profile.role, title: 'Tuck shop', nav: BOARDING_NAV });
+  main.innerHTML = `<div class="b-head"><h1>Tuck shop</h1></div><div id="sum"></div>
+    <section class="b-panel"><h2 class="b-h2">Find a boarder</h2>
+      <div class="b-filters"><label>Reg number<input id="reg" autocapitalize="characters" maxlength="20" placeholder="e.g. J0016"></label></div>
+      <div class="b-actions" style="margin:0"><button class="b-btn" id="find" type="button">Open</button></div></section>
+    <section class="b-panel" id="acct" hidden></section>
+    <section class="b-panel"><h2 class="b-h2">Accounts</h2><div id="list"><div class="b-skel"></div></div></section>`;
+  const $ = (s) => main.querySelector(s);
+  let learner = null, txRef = null;
+  const newRef = () => { txRef = learner ? fs.doc(fs.collection(db, 'tuckAccounts', learner.id, 'transactions')) : null; };
+
+  async function loadList() {
+    try {
+      const snap = await fs.getDocs(fs.query(fs.collection(db, 'tuckAccounts'), ...scopeWhere(profile), fs.limit(200)));
+      const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => (a.learnerName || '').localeCompare(b.learnerName || ''));
+      $('#sum').innerHTML = `<div class="b-cards"><div class="b-card"><div class="k">Held for boarders</div><div class="v">${usd(rows.reduce((s, r) => s + (r.balanceCents || 0), 0))}</div></div><div class="b-card"><div class="k">Accounts</div><div class="v">${rows.length}</div></div></div>`;
+      $('#list').innerHTML = rows.length ? `<table class="b-table stack"><thead><tr><th>Learner</th><th>Form</th><th class="b-num">Balance</th><th></th></tr></thead><tbody>${rows.map((r) => `<tr><td data-label="Learner">${esc(r.learnerName)}<br><small>${esc(r.id)}</small></td><td data-label="Form">${esc(r.form || '')}</td><td data-label="Balance" class="b-num ${r.balanceCents < 500 ? 'b-pos' : ''}">${usd(r.balanceCents)}</td><td><button class="b-btn b-ghost" data-open="${esc(r.id)}" type="button">Open</button></td></tr>`).join('')}</tbody></table>` : '<div class="b-empty">No tuck accounts yet. Open a boarder by reg number and add a top-up.</div>';
+    } catch (e) { showErr($('#list'), e); }
+  }
+  $('#list').addEventListener('click', (e) => { const b = e.target.closest('[data-open]'); if (b) openLearner(b.dataset.open); });
+
+  async function openLearner(id) {
+    try {
+      const s = await fs.getDoc(fs.doc(db, 'learners', id.trim().toUpperCase()));
+      if (!s.exists()) throw new Error('No learner with that reg number.');
+      const l = { id: s.id, ...s.data() };
+      if (!l.boarding) throw new Error(`${l.fullName} is not a boarder.`);
+      const sc = campusScope(profile);
+      if (sc && l.campusId !== sc) throw new Error('That learner belongs to another campus.');
+      learner = l; newRef();
+      await drawAccount();
+    } catch (e) { toast(e.message || 'Could not open', 'error'); }
+  }
+  $('#find').addEventListener('click', () => openLearner($('#reg').value));
+  $('#reg').addEventListener('keydown', (e) => { if (e.key === 'Enter') openLearner($('#reg').value); });
+
+  async function drawAccount() {
+    const box = $('#acct');
+    box.hidden = false;
+    box.innerHTML = '<div class="b-skel"></div>';
+    try {
+      const [aS, tS] = await Promise.all([fs.getDoc(fs.doc(db, 'tuckAccounts', learner.id)), fs.getDocs(fs.query(fs.collection(db, 'tuckAccounts', learner.id, 'transactions'), fs.limit(60)))]);
+      const bal = aS.exists() ? aS.data().balanceCents || 0 : 0;
+      const tx = tS.docs.map((d) => d.data()).sort((a, b) => tsMillis(b.createdAt) - tsMillis(a.createdAt)).slice(0, 25);
+      box.innerHTML = `<h2 class="b-h2">${esc(learner.fullName)} <small>${esc(learner.id)}</small></h2>
+        <div class="b-cards"><div class="b-card"><div class="k">Balance</div><div class="v">${usd(bal)}</div></div></div>
+        <form id="tf" class="b-form" novalidate>
+          <label>Action<select name="type"><option value="topup">Top up (money in)</option><option value="spend">Spend (money out)</option></select></label>
+          <label>Amount (USD)<input name="amt" inputmode="decimal" placeholder="0.00" required autocomplete="off"></label>
+          <label>Note<input name="note" maxlength="100" placeholder="e.g. Pocket money from parent, snacks"></label>
+          <div class="b-actions b-wide"><button class="b-btn" type="submit">Save</button></div></form>
+        <h3 class="b-h2">Recent activity</h3>
+        ${tx.length ? `<table class="b-table stack"><thead><tr><th>Date</th><th>Type</th><th>Note</th><th class="b-num">Amount</th><th class="b-num">Balance after</th></tr></thead><tbody>${tx.map((t) => `<tr><td data-label="Date">${esc(fmtDate(t.date))}</td><td data-label="Type">${t.type === 'topup' ? 'Top up' : 'Spent'}</td><td data-label="Note">${esc(t.note || '')}</td><td data-label="Amount" class="b-num">${t.type === 'topup' ? '+' : '-'}${usd(t.amountCents)}</td><td data-label="Balance after" class="b-num">${usd(t.balanceAfterCents)}</td></tr>`).join('')}</tbody></table>` : '<div class="b-empty">No activity yet.</div>'}`;
+      box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      $('#tf').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const f = e.target;
+        const amt = toCents(f.amt.value);
+        if (!(amt > 0) || amt > 1000000) { toast('Enter an amount above zero.', 'error'); return; }
+        const btn = f.querySelector('button'); btn.disabled = true;
+        const type = f.type.value, note = f.note.value.trim();
+        try {
+          const aRef = fs.doc(db, 'tuckAccounts', learner.id);
+          const ref = txRef;
+          await fs.runTransaction(db, async (t) => {
+            if ((await t.get(ref)).exists()) return; // already saved (double tap)
+            const s = await t.get(aRef);
+            const cur = s.exists() ? s.data().balanceCents || 0 : 0;
+            const nb = type === 'topup' ? cur + amt : cur - amt;
+            if (nb < 0) throw new Error(`Not enough money. Balance is ${usd(cur)}.`);
+            const acc = { learnerId: learner.id, learnerName: learner.fullName, campusId: learner.campusId, form: learner.form || '', balanceCents: nb, updatedAt: fs.serverTimestamp() };
+            if (!s.exists()) { acc.createdAt = fs.serverTimestamp(); acc.createdBy = profile.uid; }
+            t.set(aRef, acc, { merge: true });
+            t.set(ref, { learnerId: learner.id, campusId: learner.campusId, type, amountCents: amt, note, balanceAfterCents: nb, date: todayISO(), by: profile.uid, byName: profile.fullName || '', createdAt: fs.serverTimestamp(), createdBy: profile.uid, updatedAt: fs.serverTimestamp() });
+          });
+          toast('Saved', 'success');
+          newRef();
+          await drawAccount();
+          loadList();
+        } catch (err) { toast(err.message || 'Could not save', 'error'); btn.disabled = false; }
+      });
+    } catch (e) { showErr(box, e); }
+  }
+  loadList();
+});
+</script>
+</body>
+</html>

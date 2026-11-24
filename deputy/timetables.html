@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Timetables · Deputy · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: view a class timetable, manage duty roster and teacher cover. Role: deputy (admin allowed).
+// Collections: timetables (read; slots[] written by admin), dutyRoster (write), classes, users (teachers).
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell, setLoading } from '../shared/ui.js';
+import { crud, loadRef } from '../admin/js/crud.js';
+import { DEPUTY_NAV } from './js/nav.js';
+A.requireRole(['deputy', 'admin'], async me => {
+  const main = renderShell({ role: 'deputy', title: 'Timetables', nav: DEPUTY_NAV });
+  const cw = me.campusId === 'all' ? [] : [fs.where('campusId', '==', me.campusId)];
+  const [classes, teachers] = await Promise.all([loadRef('classes', c => c.name, ...cw), loadRef('users', u => u.fullName, fs.where('role', '==', 'teacher'), ...cw)]).catch(e => { console.error(e); toast('Could not load lists.', 'error'); return [[], []]; });
+  main.innerHTML = '<h2>Class timetable</h2><select id="k" aria-label="Class" style="min-height:44px"><option value="">Choose a class</option>' + classes.map(c => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join('') + '</select><div id="tt"></div>';
+  main.querySelector('#k').onchange = async e => { const t = main.querySelector('#tt'); if (!e.target.value) return t.innerHTML = ''; setLoading(t, true);
+    try { const sl = (await fs.getDoc(fs.doc(db, 'timetables', e.target.value))).data()?.slots || [], nm = id => teachers.find(x => x.id === id)?.label || '';
+      t.innerHTML = sl.length ? sl.map(s => `<div class="card" style="padding:8px 16px;margin-top:6px">${esc(s.day)} ${esc(s.start)}–${esc(s.end)} · ${esc(s.subjectId)} · ${esc(nm(s.teacherUid))}</div>`).join('') : '<p>No timetable built for this class yet. The admin builds it.</p>';
+    } catch (x) { console.error(x); t.innerHTML = '<p role="alert" style="color:var(--danger)">Could not load the timetable.</p>'; } setLoading(t, false); };
+  crud({ main, title: 'Duty roster and teacher cover', coll: 'dutyRoster', me, cons: cw, defaults: { campusId: me.campusId }, refs: { teacherUid: teachers, classId: classes },
+    fields: [['date', 'Date', 'date'], ['kind', 'Kind', 'select', ['duty', 'cover']], ['teacherUid', 'Teacher', 'ref'], ['classId', 'Class (for cover)', 'ref', null, 'optional'], ['duty', 'Duty or lesson', 'text']] });
+});
+</script></body></html>

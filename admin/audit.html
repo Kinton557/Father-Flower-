@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Audit log · Admin</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: filterable audit log (newest first). Role: admin. Collections: auditLog (read).
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, fmtDate, renderShell, setLoading } from '../shared/ui.js';
+import { ADMIN_NAV } from './js/nav.js';
+const $ = id => document.getElementById(id);
+A.requireRole(['admin'], () => {
+  const main = renderShell({ role: 'admin', title: 'Audit log', nav: ADMIN_NAV });
+  let rows = [], last = null, more = false;
+  main.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px"><input id="q" placeholder="Filter by action or path" aria-label="Filter" style="flex:1 1 180px;min-height:44px;padding:8px;border:1px solid var(--line);border-radius:10px"><select id="r" aria-label="Role" style="min-height:44px"><option value="">All roles</option>${['admin','head','deputy','sdc','bursar','boarding','teacher','learner','parent'].map(r => `<option>${r}</option>`).join('')}</select></div><div id="list"></div><button id="more" class="btn" style="min-height:44px;margin-top:12px" hidden>Load more</button>`;
+  async function load(reset) {
+    if (reset) { rows = []; last = null; } setLoading($('list'), true);
+    try { const cs = [fs.collection(db, 'auditLog')]; if ($('r').value) cs.push(fs.where('actorRole', '==', $('r').value)); cs.push(fs.orderBy('at', 'desc')); if (last) cs.push(fs.startAfter(last)); cs.push(fs.limit(50));
+      const s = await fs.getDocs(fs.query(...cs)); s.docs.forEach(d => rows.push({ id: d.id, ...d.data() })); last = s.docs[s.docs.length - 1] || last; more = s.size === 50;
+    } catch (e) { console.error(e); $('list').innerHTML = `<p role="alert" style="color:var(--danger)">Could not load the log.</p>`; return; }
+    setLoading($('list'), false); draw();
+  }
+  function draw() {
+    const t = $('q').value.trim().toLowerCase(); $('more').hidden = !more;
+    const v = rows.filter(r => !t || (r.action || '').toLowerCase().includes(t) || (r.targetPath || '').toLowerCase().includes(t));
+    $('list').innerHTML = v.length ? v.map(r => `<div class="card" style="padding:10px 16px;margin-bottom:6px"><strong>${esc(r.action)}</strong> <span style="color:var(--muted)">${esc(r.actorRole)} · ${esc(fmtDate(r.at))}</span><div style="font-size:.9rem;word-break:break-all">${esc(r.targetPath)} ${esc(JSON.stringify(r.details || {}))}</div></div>`).join('') : '<p>No entries match.</p>';
+  }
+  $('q').oninput = draw; $('r').onchange = () => load(true); $('more').onclick = () => load(false); load(true);
+});
+</script></body></html>

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Visits | Boarding</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * boarding/visits.html
+ * Purpose: visiting-day schedule and visitor sign-in and sign-out.
+ * Role allowed: boarding, admin.
+ * Collections used: visitDays, visits, learners (lookup).
+ */
+import { requireRole } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell } from '../shared/ui.js';
+import { mountCrud } from '../bursar/js/crud.js';
+import { BOARDING_NAV, nowTime, todayISO, tabs, showErr } from '../bursar/js/common.js';
+
+requireRole(['boarding', 'admin'], async (profile) => {
+  const main = renderShell({ role: profile.role, title: 'Visits', nav: BOARDING_NAV });
+  main.innerHTML = `<div class="b-head"><h1>Visits</h1></div>
+    <div class="b-tabs" role="tablist"><button data-tab="v" type="button" role="tab">Visitor sign-in</button><button data-tab="d" type="button" role="tab">Visiting days</button></div>
+    <div data-panel="v"></div><div data-panel="d" hidden></div>`;
+  const cfgs = {
+    v: {
+      collection: 'visits', newLabel: 'Sign in a visitor', empty: 'No visitors signed in yet.',
+      defaults: () => ({ status: 'in', timeIn: nowTime(), date: todayISO() }),
+      sort: (a, b) => (b.date || '').localeCompare(a.date || '') || (b.timeIn || '').localeCompare(a.timeIn || ''),
+      fields: [
+        { key: 'learnerId', label: 'Boarder reg number', type: 'learner', required: true, boarderOnly: true },
+        { key: 'visitorName', label: 'Visitor name', type: 'text', required: true, max: 100 },
+        { key: 'relationship', label: 'Relationship', type: 'select', required: true, options: ['Parent', 'Guardian', 'Sibling', 'Relative', 'Other'] },
+        { key: 'phone', label: 'Visitor phone', type: 'text', max: 30 },
+        { key: 'date', label: 'Date', type: 'date', required: true },
+        { key: 'timeIn', label: 'Time in', type: 'time', required: true },
+        { key: 'timeOut', label: 'Time out', type: 'time' },
+        { key: 'itemsBrought', label: 'Items brought for the learner (checked at the gate)', type: 'textarea', wide: true }
+      ],
+      columns: [
+        { label: 'Learner', html: (r) => `${esc(r.learnerName || '')}<br><small>${esc(r.learnerId)}</small>` },
+        { label: 'Visitor', html: (r) => `${esc(r.visitorName)}<br><small>${esc(r.relationship || '')} ${esc(r.phone || '')}</small>` },
+        { label: 'Date', key: 'date', type: 'date' },
+        { label: 'In and out', html: (r) => `${esc(r.timeIn || '')} to ${esc(r.timeOut || '')}` },
+        { label: 'Status', html: (r) => (r.timeOut ? '<span class="b-tag ok">Left</span>' : '<span class="b-tag warn">On site</span>') }
+      ],
+      rowActions: [{ label: 'Sign out', show: (r) => !r.timeOut,
+        run: async (r, { reload }) => { await fs.updateDoc(fs.doc(db, 'visits', r.id), { timeOut: nowTime(), status: 'out', updatedAt: fs.serverTimestamp() }); toast('Visitor signed out', 'success'); reload(); } }]
+    },
+    d: {
+      collection: 'visitDays', newLabel: 'Add visiting day', empty: 'No visiting days scheduled.', sort: (a, b) => (b.date || '').localeCompare(a.date || ''),
+      fields: [
+        { key: 'date', label: 'Date', type: 'date', required: true },
+        { key: 'startTime', label: 'From', type: 'time', required: true, default: '09:00' },
+        { key: 'endTime', label: 'Until', type: 'time', required: true, default: '15:00' },
+        { key: 'notes', label: 'Notes for parents (what to bring, gate rules)', type: 'textarea', wide: true }
+      ],
+      validate: async (d) => { if (d.endTime <= d.startTime) throw new Error('The end time must be after the start time.'); }
+    }
+  };
+  const mounted = {};
+  tabs(main, async (n) => {
+    if (mounted[n]) return; mounted[n] = true;
+    const host = main.querySelector(`[data-panel="${n}"]`);
+    try { await mountCrud(host, cfgs[n], profile); } catch (e) { showErr(host, e); }
+  })('v');
+});
+</script>
+</body>
+</html>

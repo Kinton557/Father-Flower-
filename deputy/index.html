@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Today · Deputy · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: deputy's overview for today: registers taken, boarders missing, discipline entries, exeats out. Role: deputy (admin allowed).
+// Collections read: classes, attendance, boardingRegister, discipline, exeats.
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell, setLoading } from '../shared/ui.js';
+import { crud, loadRef } from '../admin/js/crud.js';
+import { DEPUTY_NAV } from './js/nav.js';
+const today = new Date().toISOString().slice(0, 10), col = n => fs.collection(db, n);
+const card = (l, v, h) => `<a class="card" href="${h}" style="padding:16px;text-decoration:none;color:inherit;display:block"><div style="font-size:.85rem;color:var(--muted)">${esc(l)}</div><div style="font:700 1.7rem Playfair Display,Georgia,serif;color:var(--navy)">${esc(String(v))}</div></a>`;
+A.requireRole(['deputy', 'admin'], async me => {
+  const main = renderShell({ role: 'deputy', title: 'Today', nav: DEPUTY_NAV }); main.innerHTML = '<div id="s" style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))"></div>'; const s = main.querySelector('#s'); setLoading(s, true);
+  try {
+    const cw = me.campusId === 'all' ? [] : [fs.where('campusId', '==', me.campusId)], lim = fs.limit(300);
+    const [cl, at, br, di, ex] = await Promise.all([fs.getDocs(fs.query(col('classes'), ...cw, lim)), fs.getDocs(fs.query(col('attendance'), fs.where('date', '==', today), lim)), fs.getDocs(fs.query(col('boardingRegister'), lim)), fs.getDocs(fs.query(col('discipline'), lim)), fs.getDocs(fs.query(col('exeats'), fs.where('status', '==', 'out'), lim))]);
+    const ids = new Set(cl.docs.map(d => d.id)), taken = at.docs.filter(d => ids.has(d.data().classId)).length; let miss = 0;
+    br.forEach(d => { if (d.id.includes('_' + today + '_')) Object.values(d.data().records || {}).forEach(v => { if (v === 'absent') miss++; }); });
+    const dis = di.docs.filter(d => (d.data().createdAt?.toDate?.().toISOString().slice(0, 10)) === today).length;
+    s.innerHTML = card('Registers taken', `${taken} of ${ids.size} classes`, 'attendance.html') + card('Boarders missing', miss, '#') + card('Discipline entries today', dis, 'discipline.html') + card('Learners on exeat', ex.size, '#');
+  } catch (e) { console.error(e); s.innerHTML = '<p role="alert" style="color:var(--danger)">Could not load today. Refresh and try again.</p>'; }
+  setLoading(s, false);
+});
+</script></body></html>

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>News | Father Flower Educational Network</title>
+<meta name="description" content="Latest news, events and achievements from Father Flower Educational Network schools in Zimbabwe.">
+<meta name="theme-color" content="#13203F">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Father Flower news">
+<meta property="og:description" content="News and updates from our campuses.">
+<meta property="og:image" content="https://kinton557.github.io/Father-Flower-/assets/og.jpg">
+<link rel="icon" href="assets/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap">
+<link rel="stylesheet" href="css/site.css">
+</head>
+<body data-page="news">
+<a class="skip" href="#main">Skip to content</a>
+<div id="site-header"></div>
+<main id="main">
+
+<section class="page-head"><div class="wrap"><p class="eyebrow">News</p><h1>News and updates</h1><p>What is happening across our schools.</p></div></section>
+
+<section class="section" id="list-view">
+  <div class="wrap">
+    <div class="tools">
+      <div class="field" style="margin:0"><label for="q" class="lbl" style="position:absolute;left:-9999px">Search news</label><input id="q" type="search" placeholder="Search news" autocomplete="off"></div>
+      <div class="field" style="margin:0"><label for="campus" style="position:absolute;left:-9999px">Campus</label><select id="campus"><option value="">All campuses</option></select></div>
+    </div>
+    <div class="grid" id="news-grid" aria-live="polite"></div>
+  </div>
+</section>
+
+<section class="section" id="article-view" hidden>
+  <div class="wrap">
+    <article class="article" id="article"></article>
+  </div>
+</section>
+
+</main>
+<div id="site-footer"></div>
+<script type="module" src="js/site/news.js"></script>
+</body>
+</html>

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Plans and waivers | Bursar</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="./css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * bursar/plans.html
+ * Purpose: payment plans (instalments), waivers and bursaries. Waivers and bursaries credit the learner's account.
+ * Role allowed: bursar, admin.
+ * Collections used: paymentPlans, accounts, accounts/{id}/charges, financeSummary, learners (lookup), auditLog.
+ */
+import { audit } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast } from '../shared/ui.js';
+import { crudPage } from './js/crud.js';
+import { BURSAR_NAV, getSchool, usd, todayISO } from './js/common.js';
+
+const parseInstalments = (text) => {
+  const out = [];
+  for (const line of String(text || '').split('\n').map((l) => l.trim()).filter(Boolean)) {
+    const m = line.match(/^(\d{4}-\d{2}-\d{2})\s*[,;]\s*\$?([\d.,]+)$/);
+    if (!m) throw new Error(`Instalment line "${line}" must look like 2026-02-15, 120.00`);
+    const cents = Math.round(Number(m[2].replace(/,/g, '')) * 100);
+    if (!(cents > 0)) throw new Error('Each instalment needs an amount above zero.');
+    out.push({ dueDate: m[1], amountCents: cents, paid: false });
+  }
+  return out;
+};
+const TYPE = { plan: 'Payment plan', waiver: 'Waiver', bursary: 'Bursary' };
+
+crudPage({
+  roles: ['bursar', 'admin'],
+  nav: BURSAR_NAV,
+  title: 'Plans, waivers and bursaries',
+  intro: 'Waivers and bursaries reduce the learner\'s balance straight away and cannot be edited afterwards. A payment plan only records the agreed instalments.',
+  collection: 'paymentPlans',
+  newLabel: 'New plan, waiver or bursary',
+  empty: 'No plans, waivers or bursaries yet.',
+  noDelete: true,
+  auditSave: true,
+  canEditRow: (r) => r.type === 'plan',
+  fields: [
+    { key: 'learnerId', label: 'Learner reg number', type: 'learner', required: true },
+    { key: 'type', label: 'Type', type: 'select', required: true, options: [{ v: 'plan', l: 'Payment plan' }, { v: 'waiver', l: 'Waiver' }, { v: 'bursary', l: 'Bursary' }] },
+    { key: 'amountCents', label: 'Amount (USD). Plan: total covered. Waiver or bursary: amount credited.', type: 'money', required: true },
+    { key: 'description', label: 'Reason or description', type: 'textarea', required: true, wide: true },
+    { key: 'approvalNote', label: 'Approved by and note (required for waivers and bursaries)', type: 'text', max: 200, wide: true },
+    { key: 'instalments', label: 'Instalments for a plan. One per line: date, amount (e.g. 2026-02-15, 120.00)', type: 'textarea', wide: true,
+      format: (v) => (Array.isArray(v) ? v.map((i) => `${i.dueDate}, ${(i.amountCents / 100).toFixed(2)}`).join('\n') : ''), parse: parseInstalments },
+    { key: 'status', label: 'Status', type: 'select', default: 'active', options: [{ v: 'active', l: 'Active' }, { v: 'completed', l: 'Completed' }, { v: 'cancelled', l: 'Cancelled' }] }
+  ],
+  columns: [
+    { label: 'Learner', html: (r) => `${esc(r.learnerName || '')}<br><small>${esc(r.learnerId)} ${esc(r.form || '')}</small>` },
+    { label: 'Type', html: (r) => esc(TYPE[r.type] || r.type) },
+    { label: 'Amount', type: 'money', key: 'amountCents' },
+    { label: 'Instalments', html: (r) => (r.type === 'plan' ? `${(r.instalments || []).length} due` : 'n/a') },
+    { label: 'Status', html: (r) => `<span class="b-tag ${r.status === 'active' ? 'warn' : r.status === 'completed' ? 'ok' : ''}">${esc(r.status || '')}</span>` },
+    { label: 'Note', html: (r) => esc(r.description || '') }
+  ],
+  rowActions: [
+    { label: 'Mark completed', show: (r) => r.type === 'plan' && r.status === 'active',
+      run: async (r, { reload }) => { await fs.updateDoc(fs.doc(db, 'paymentPlans', r.id), { status: 'completed', updatedAt: fs.serverTimestamp() }); toast('Plan completed', 'success'); reload(); } },
+    { label: 'Cancel plan', show: (r) => r.type === 'plan' && r.status === 'active',
+      run: async (r, { reload }) => { await fs.updateDoc(fs.doc(db, 'paymentPlans', r.id), { status: 'cancelled', updatedAt: fs.serverTimestamp() }); toast('Plan cancelled', 'success'); reload(); } }
+  ],
+  summary: async (rows) => {
+    const waived = rows.filter((r) => r.type !== 'plan' && r.status !== 'cancelled').reduce((s, r) => s + (r.amountCents || 0), 0);
+    return `<div class="b-cards"><div class="b-card"><div class="k">Active plans</div><div class="v">${rows.filter((r) => r.type === 'plan' && r.status === 'active').length}</div></div>
+      <div class="b-card"><div class="k">Waived and bursaries</div><div class="v">${usd(waived)}</div></div></div>`;
+  },
+  validate: async (d) => {
+    if (d.type === 'plan') {
+      if (!d.instalments.length) throw new Error('A payment plan needs at least one instalment.');
+      const sum = d.instalments.reduce((s, i) => s + i.amountCents, 0);
+      if (sum !== d.amountCents) throw new Error(`The instalments add up to ${usd(sum)} but the plan amount is ${usd(d.amountCents)}.`);
+    } else {
+      if (!d.approvalNote) throw new Error('Waivers and bursaries need an approval note.');
+      d.instalments = [];
+    }
+  },
+  batchSave: async (b, { id, data, isNew, profile }) => {
+    if (!isNew || data.type === 'plan') return;
+    const accRef = fs.doc(db, 'accounts', data.learnerId);
+    const acc = await fs.getDoc(accRef);
+    if (!acc.exists()) throw new Error('This learner has no finance account yet. Open accounts first.');
+    const school = await getSchool();
+    const credit = -data.amountCents;
+    b.set(fs.doc(db, 'paymentPlans', id), { termId: school.currentTermId || '', appliedAt: fs.serverTimestamp() }, { merge: true });
+    b.set(fs.doc(db, 'accounts', data.learnerId, 'charges', `${data.type}_${id}`), {
+      learnerId: data.learnerId, campusId: acc.data().campusId, termId: school.currentTermId || '', kind: data.type,
+      description: `${TYPE[data.type]}: ${data.description}`.slice(0, 160), amountCents: credit, date: todayISO(),
+      createdAt: fs.serverTimestamp(), createdBy: profile.uid, updatedAt: fs.serverTimestamp()
+    });
+    b.set(accRef, { totalDueCents: fs.increment(credit), balanceCents: fs.increment(credit), updatedAt: fs.serverTimestamp() }, { merge: true });
+    if (school.currentTermId) b.set(fs.doc(db, 'financeSummary', `${acc.data().campusId}_${school.currentTermId}`), { campusId: acc.data().campusId, termId: school.currentTermId, billedCents: fs.increment(credit), updatedAt: fs.serverTimestamp() }, { merge: true });
+  },
+  afterSave: async ({ id, data, isNew }) => {
+    if (isNew && data.type !== 'plan') await audit(`account.${data.type}`, `paymentPlans/${id}`, { learnerId: data.learnerId, amountCents: data.amountCents, note: data.approvalNote });
+  }
+});
+</script>
+</body>
+</html>

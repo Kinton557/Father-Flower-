@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Timetable · Admin</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: build a class timetable as weekly slots and copy one class's timetable to another. Role: admin.
+// Collections: timetables/{classId} {slots[{day,start,end,subjectId,teacherUid}]}, classes, subjects, users (teachers).
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, confirmBox, renderShell, setLoading } from '../shared/ui.js';
+import { loadRef } from './js/crud.js';
+import { ADMIN_NAV } from './js/nav.js';
+const $ = id => document.getElementById(id), DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'], S = 'min-height:44px;padding:6px';
+A.requireRole(['admin'], async me => {
+  const main = renderShell({ role: 'admin', title: 'Timetable', nav: ADMIN_NAV });
+  const [cls, subs, tch] = await Promise.all([loadRef('classes', c => c.name), loadRef('subjects', s => s.name), loadRef('users', u => u.fullName, fs.where('role', '==', 'teacher'))]).catch(e => { console.error(e); toast('Could not load lists.', 'error'); return [[], [], []]; });
+  const op = (a, v) => '<option value="">–</option>' + a.map(o => `<option value="${esc(o.id)}"${o.id === v ? ' selected' : ''}>${esc(o.label)}</option>`).join('');
+  main.innerHTML = `<select id="k" aria-label="Class" style="${S}">${op(cls, '')}</select> <select id="from" aria-label="Copy from class" style="${S}">${op(cls, '')}</select><button id="cp" class="btn" style="${S}">Copy from this class</button><div id="rows" style="margin-top:12px"></div><button id="add" class="btn" style="${S}" hidden>Add slot</button> <button id="save" class="btn btn-primary" style="${S}" hidden>Save timetable</button>`;
+  let slots = [];
+  const draw = () => { $('rows').innerHTML = slots.map((s, i) => `<div class="card" style="padding:8px;margin-bottom:6px;display:flex;gap:6px;flex-wrap:wrap" data-i="${i}"><select data-f="day" style="${S}">${DAYS.map(d => `<option${d === s.day ? ' selected' : ''}>${d}</option>`).join('')}</select><input data-f="start" type="time" value="${esc(s.start)}" style="${S}"><input data-f="end" type="time" value="${esc(s.end)}" style="${S}"><select data-f="subjectId" style="${S}">${op(subs, s.subjectId)}</select><select data-f="teacherUid" style="${S}">${op(tch, s.teacherUid)}</select><button class="btn" data-x="${i}" style="${S}">Remove</button></div>`).join('') || '<p>No slots yet. Use “Add slot”.</p>'; };
+  const pull = () => document.querySelectorAll('[data-i]').forEach(r => r.querySelectorAll('[data-f]').forEach(f => slots[+r.dataset.i][f.dataset.f] = f.value));
+  async function open(id, into) { try { slots = (await fs.getDoc(fs.doc(db, 'timetables', id))).data()?.slots || []; if (into) { $('add').hidden = $('save').hidden = false; } draw(); } catch (e) { console.error(e); toast('Could not load.', 'error'); } }
+  $('k').onchange = e => { if (!e.target.value) { slots = []; $('add').hidden = $('save').hidden = true; return draw(); } open(e.target.value, true); };
+  $('add').onclick = () => { pull(); slots.push({ day: 'Mon', start: '07:30', end: '08:10', subjectId: '', teacherUid: '' }); draw(); };
+  $('rows').onclick = e => { const x = e.target.closest('[data-x]'); if (x) { pull(); slots.splice(+x.dataset.x, 1); draw(); } };
+  $('cp').onclick = async () => { if (!$('k').value || !$('from').value) return toast('Choose both classes.', 'error'); if (await confirmBox('Replace the slots on screen with the other class’s timetable?')) open($('from').value, true); };
+  $('save').onclick = async () => { pull();
+    if (slots.some(s => !s.subjectId || !s.start || !s.end || s.end <= s.start)) return toast('Every slot needs a subject and an end time after its start.', 'error');
+    try { await fs.setDoc(fs.doc(db, 'timetables', $('k').value), { classId: $('k').value, slots, updatedAt: fs.serverTimestamp(), createdBy: me.uid }, { merge: true }); await A.audit('timetable.save', 'timetables/' + $('k').value, { slots: slots.length }); toast('Timetable saved', 'success'); } catch (e) { console.error(e); toast('Could not save.', 'error'); } };
+  draw();
+});
+</script></body></html>

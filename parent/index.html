@@ -1,0 +1,46 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Parent home · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* parent/index.html — purpose: child switcher + snapshot (latest published report, fees balance read-only, attendance, assignments, notices).
+   Role: parent (admin may preview). Collections: learners, reports, accounts, attendance, assignments, notices */
+import { requireRole } from '../shared/auth.js';
+import { renderShell, esc, money, fmtDate } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, list, getChildren } from './js/common.js';
+import { noticesFor } from '../learner/js/common.js';
+const { where, doc, getDoc } = fs;
+requireRole(['parent', 'admin'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'parent', title: 'My children', nav: NAV });
+  main.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const kids = await getChildren(p);
+    if (!kids.length) { main.innerHTML = '<div class="tcard">No learner is linked to your account yet. Please contact the school office.</div>'; return; }
+    main.innerHTML = `${kids.length > 1 ? `<div class="trow"><label>Child<select id="k">${kids.map(k => `<option value="${esc(k.id)}">${esc(k.fullName)}</option>`).join('')}</select></label></div>` : ''}<div id="s"></div>`;
+    const box = main.querySelector('#s');
+    async function show() {
+      const k = kids.find(x => x.id === (main.querySelector('#k') ? main.querySelector('#k').value : kids[0].id));
+      box.innerHTML = '<p class="muted">Loading…</p>';
+      const today = new Date().toISOString().slice(0, 10);
+      const [reps, acc, att, as, nt] = await Promise.all([
+        list('reports', where('learnerId', '==', k.id), where('status', '==', 'published')).catch(() => []),
+        getDoc(doc(db, 'accounts', k.id)).catch(() => null),
+        list('attendance', where('classId', '==', k.classId)).catch(() => []),
+        list('assignments', where('classId', '==', k.classId)).catch(() => []),
+        noticesFor('parent', k.campusId).catch(() => [])]);
+      const rep = reps.sort((a, b) => (a.termId < b.termId ? 1 : -1))[0];
+      let pres = 0, tot = 0; att.forEach(d => { const v = (d.records || {})[k.id]; if (v) { tot++; if (v !== 'absent') pres++; } });
+      const bal = acc && acc.exists() ? acc.data().balanceCents : null;
+      const due = as.filter(a => a.dueDate >= today).sort((a, b) => (a.dueDate < b.dueDate ? -1 : 1)).slice(0, 3);
+      box.innerHTML = `<div class="tgrid">
+        <div class="tcard"><h3>Latest report</h3>${rep ? `<div class="big">${esc(rep.average ?? '–')}%</div><div class="muted">Position in class: ${esc(rep.positionInClass ?? '–')}</div>` : '<p class="muted">No published report yet.</p>'}<p><a class="tbtn alt" href="report.html">Open report cards</a></p></div>
+        <div class="tcard"><h3>Attendance</h3><div class="big">${tot ? Math.round(pres / tot * 100) + '%' : '–'}</div><div class="muted">${tot} registers recorded</div></div>
+        <div class="tcard"><h3>Fees balance</h3><div class="big">${bal == null ? '–' : esc(money(bal))}</div><div class="muted">Read only. See the bursar for payments.</div></div>
+        <div class="tcard"><h3>Assignments due</h3>${due.map(a => `<p>${esc(a.title)} <span class="muted">${esc(fmtDate(a.dueDate))}</span></p>`).join('') || '<p class="muted">None due.</p>'}</div>
+        ${k.boarding ? '<div class="tcard"><h3>Boarding</h3><p><a class="tbtn alt" href="../boarding/exeats.html">Request an exeat</a></p></div>' : ''}</div>
+        <h2>Notices</h2>${nt.slice(0, 5).map(n => `<div class="tcard" style="margin-bottom:8px"><strong>${esc(n.title)}</strong><div class="muted">${esc(n.body)}</div></div>`).join('') || '<p class="muted">No notices right now.</p>'}`;
+    }
+    const sel = main.querySelector('#k'); if (sel) sel.onchange = show; show();
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load. Refresh and try again.</div>'; }
+});
+</script></body></html>

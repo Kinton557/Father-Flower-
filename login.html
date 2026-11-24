@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in | Father Flower Parent and Learner Portal</title>
+<meta name="description" content="Sign in to the Father Flower portal with your ID number. For learners, parents, teachers and staff.">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#13203F">
+<meta property="og:title" content="Father Flower Portal">
+<meta property="og:image" content="https://kinton557.github.io/Father-Flower-/assets/og.jpg">
+<link rel="icon" href="assets/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap">
+<link rel="stylesheet" href="css/site.css">
+</head>
+<body data-page="login">
+<a class="skip" href="#main">Skip to content</a>
+<div id="site-header"></div>
+<main id="main">
+<div class="auth">
+
+  <section id="login-panel" aria-labelledby="login-h">
+    <p class="eyebrow">Portal</p>
+    <h1 id="login-h" style="font-size:2rem">Sign in</h1>
+    <p class="muted">For learners, parents, teachers and staff. Use your ID number, not an email.</p>
+    <div class="form-card">
+      <div id="login-error" class="alert error" role="alert" hidden></div>
+      <form id="login-form" novalidate autocomplete="on">
+        <div class="field">
+          <label for="loginId" class="req">ID number</label>
+          <input id="loginId" name="loginId" type="text" inputmode="text" autocomplete="username" autocapitalize="characters" spellcheck="false" placeholder="e.g. J0016" required>
+          <div class="hint">Learner J0016, parent P0016, staff EC12345</div>
+        </div>
+        <div class="field">
+          <label for="password" class="req">Password</label>
+          <div class="pw-wrap">
+            <input id="password" name="password" type="password" autocomplete="current-password" required>
+            <button type="button" class="pw-toggle" id="toggle-pw" aria-pressed="false" aria-controls="password">Show</button>
+          </div>
+        </div>
+        <button class="btn btn-navy btn-block" id="login-btn" type="submit">Sign in</button>
+      </form>
+      <div class="divider">or</div>
+      <button class="btn btn-ghost btn-block" id="google-btn" type="button" style="color:var(--navy)">Staff sign in with Google</button>
+    </div>
+    <details class="help" style="margin-top:16px">
+      <summary>Login help</summary>
+      <ul class="ticks" style="margin-top:6px">
+        <li>Your ID number was given to you by the school office.</li>
+        <li>First time? Use the temporary password from the school. You will be asked to choose your own.</li>
+        <li>Forgot your password? Ask the school office or your class teacher to reset it.</li>
+        <li>Accounts are created by the school. There is no self sign-up.</li>
+      </ul>
+      <p class="small muted" id="help-contact"></p>
+    </details>
+  </section>
+
+  <section id="change-panel" aria-labelledby="change-h" hidden>
+    <p class="eyebrow">First sign in</p>
+    <h1 id="change-h" style="font-size:2rem">Choose a new password</h1>
+    <p class="muted">For your safety you must replace the temporary password before continuing.</p>
+    <div class="form-card">
+      <div id="change-error" class="alert error" role="alert" hidden></div>
+      <form id="change-form" novalidate>
+        <div class="field">
+          <label for="newPw" class="req">New password</label>
+          <input id="newPw" type="password" autocomplete="new-password" required>
+          <div class="hint">At least 8 characters, with a letter and a number.</div>
+        </div>
+        <div class="field">
+          <label for="newPw2" class="req">Confirm new password</label>
+          <input id="newPw2" type="password" autocomplete="new-password" required>
+        </div>
+        <button class="btn btn-navy btn-block" id="change-btn" type="submit">Save and continue</button>
+      </form>
+    </div>
+  </section>
+
+</div>
+</main>
+<div id="site-footer"></div>
+<script type="module" src="js/site/login.js"></script>
+</body>
+</html>

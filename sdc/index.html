@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SDC overview | Father Flower</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * sdc/index.html
+ * Purpose: SDC home. Summary figures only: fees billed, collected and outstanding totals, levy income, project progress.
+ *          Never shows learner accounts or names.
+ * Role allowed: sdc, admin.
+ * Collections used: financeSummary (totals), levies, sdcProjects, expenditures (amounts only), sdcMeetings.
+ */
+import { requireRole } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, renderShell, fmtDate } from '../shared/ui.js';
+import { SDC_NAV, scopeWhere, loadTerms, getSchool, pickCurrentTerm, termLabel, usd, todayISO, showErr } from '../bursar/js/common.js';
+
+requireRole(['sdc', 'admin'], async (profile) => {
+  const main = renderShell({ role: profile.role, title: 'SDC', nav: SDC_NAV });
+  main.innerHTML = `<div class="b-head"><h1>School Development Committee</h1><span class="b-sub" id="term"></span></div>
+    <div class="b-cards" id="cards"><div class="b-skel"></div><div class="b-skel"></div><div class="b-skel"></div><div class="b-skel"></div></div>
+    <section class="b-panel"><h2 class="b-h2">Development projects</h2><div id="proj"><div class="b-skel"></div></div></section>
+    <section class="b-panel"><h2 class="b-h2">Next meeting</h2><div id="meet"><div class="b-skel"></div></div></section>`;
+  const $ = (s) => main.querySelector(s);
+  try {
+    const base = scopeWhere(profile);
+    const [terms, school] = await Promise.all([loadTerms(), getSchool()]);
+    const term = pickCurrentTerm(terms, school);
+    $('#term').textContent = term ? termLabel(term) : '';
+    const [sumS, levS, projS, expS, mtS] = await Promise.all([
+      term ? fs.getDocs(fs.query(fs.collection(db, 'financeSummary'), ...base, fs.where('termId', '==', term.id), fs.limit(50))) : Promise.resolve({ docs: [] }),
+      fs.getDocs(fs.query(fs.collection(db, 'levies'), ...base, fs.limit(100))),
+      fs.getDocs(fs.query(fs.collection(db, 'sdcProjects'), ...base, fs.limit(100))),
+      fs.getDocs(fs.query(fs.collection(db, 'expenditures'), ...base, fs.where('status', '==', 'requested'), fs.limit(100))),
+      fs.getDocs(fs.query(fs.collection(db, 'sdcMeetings'), ...base, fs.where('status', '==', 'scheduled'), fs.limit(30)))
+    ]);
+    const billed = sumS.docs.reduce((s, d) => s + (d.data().billedCents || 0), 0);
+    const collected = sumS.docs.reduce((s, d) => s + (d.data().collectedCents || 0), 0);
+    const levies = levS.docs.map((d) => d.data());
+    const levyCollected = levies.reduce((s, l) => s + (l.collectedCents || 0), 0);
+    const pending = expS.docs.map((d) => d.data()).reduce((s, e) => s + (e.amountCents || 0), 0);
+    $('#cards').innerHTML = `
+      <div class="b-card"><div class="k">Fees billed this term</div><div class="v">${usd(billed)}</div></div>
+      <div class="b-card"><div class="k">Fees collected</div><div class="v">${usd(collected)}</div><div class="n">${billed ? Math.round((collected / billed) * 100) : 0}% of billed</div></div>
+      <div class="b-card"><div class="k">Fees outstanding</div><div class="v">${usd(Math.max(0, billed - collected))}</div><div class="n">Totals only</div></div>
+      <div class="b-card"><div class="k">Levy income</div><div class="v">${usd(levyCollected)}</div><div class="n">${levies.length} levies</div></div>
+      <div class="b-card"><div class="k">Spending awaiting your approval</div><div class="v">${usd(pending)}</div><div class="n">${expS.size} request(s)</div></div>`;
+    const projects = projS.docs.map((d) => ({ id: d.id, ...d.data() }));
+    $('#proj').innerHTML = projects.length ? projects.map((p) => `<div style="margin-bottom:14px"><div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><strong>${esc(p.name)}</strong><span class="b-sub" style="margin:0">${usd(p.spentCents)} of ${usd(p.budgetCents)} spent</span></div>
+      <div role="progressbar" aria-valuenow="${Number(p.progress) || 0}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(p.name)} progress" style="height:12px;border-radius:8px;background:var(--b-soft);overflow:hidden;margin-top:6px"><div style="height:100%;width:${Math.min(100, Math.max(0, Number(p.progress) || 0))}%;background:var(--gold,#C9A24A)"></div></div><small>${Number(p.progress) || 0}% complete</small></div>`).join('') : '<div class="b-empty">No projects yet. Add one on the Projects page.</div>';
+    const next = mtS.docs.map((d) => d.data()).filter((m) => (m.date || '') >= todayISO()).sort((a, b) => (a.date || '').localeCompare(b.date || ''))[0];
+    $('#meet').innerHTML = next ? `<p><strong>${esc(next.title || 'SDC meeting')}</strong><br>${esc(fmtDate(next.date))} ${esc(next.time || '')} at ${esc(next.venue || 'the school')}</p>` : '<div class="b-empty">No meeting scheduled.</div>';
+  } catch (e) { showErr($('#cards'), e); $('#proj').innerHTML = ''; $('#meet').innerHTML = ''; }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Learner Registration Request | Father Flower Educational Network</title>
+<meta name="description" content="Request registration for a learner at Father Flower Educational Network. The school will confirm by phone.">
+<meta name="theme-color" content="#13203F">
+<meta property="og:title" content="Learner registration request | Father Flower">
+<meta property="og:image" content="https://kinton557.github.io/Father-Flower-/assets/og.jpg">
+<link rel="icon" href="assets/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap">
+<link rel="stylesheet" href="css/site.css">
+</head>
+<body data-page="register">
+<a class="skip" href="#main">Skip to content</a>
+<div id="site-header"></div>
+<main id="main">
+
+<section class="page-head"><div class="wrap"><p class="eyebrow">Registration</p><h1>Learner registration request</h1><p>A short form to tell us about your child. Want to attach documents? Use the full <a href="admissions.html#apply" style="color:var(--gold)">admissions form</a>.</p></div></section>
+
+<section class="section">
+  <div class="wrap" style="max-width:720px">
+    <div id="apply-intro">
+      <div class="alert info"><strong>Please note:</strong> this form sends a registration request. It does not create a portal account. The school will confirm by phone, and then give you your ID number and login details.</div>
+    </div>
+    <div class="form-card">
+      <form id="apply-form" novalidate>
+        <div id="apply-error" class="alert error" role="alert" hidden></div>
+        <div class="hp" aria-hidden="true"><label>Website <input type="text" name="website" tabindex="-1" autocomplete="off"></label></div>
+
+        <fieldset>
+          <legend>Learner</legend>
+          <div class="row c2">
+            <div class="field"><label for="firstName" class="req">First name</label><input id="firstName" name="firstName" autocomplete="off" required><div class="err"></div></div>
+            <div class="field"><label for="lastName" class="req">Surname</label><input id="lastName" name="lastName" autocomplete="off" required><div class="err"></div></div>
+          </div>
+          <div class="row c2">
+            <div class="field"><label for="gender" class="req">Gender</label><select id="gender" name="gender" required><option value="">Choose</option><option>Female</option><option>Male</option></select><div class="err"></div></div>
+            <div class="field"><label for="dob" class="req">Date of birth</label><input id="dob" name="dob" type="date" required><div class="err"></div></div>
+          </div>
+          <div class="row c2">
+            <div class="field"><label for="campus" class="req">Campus</label><select id="campus" name="campus" required></select><div class="err"></div></div>
+            <div class="field"><label for="formApplying" class="req">Form or grade</label><select id="formApplying" name="formApplying" required></select><div class="err"></div></div>
+          </div>
+          <div class="field"><span class="lbl req">Boarding or day</span>
+            <div class="choice"><label><input type="radio" name="boarding" value="day" required> Day scholar</label><label><input type="radio" name="boarding" value="boarding"> Boarder</label></div><div class="err"></div></div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Parent or guardian</legend>
+          <div class="field"><label for="gName" class="req">Full name</label><input id="gName" name="gName" autocomplete="name" required><div class="err"></div></div>
+          <div class="row c2">
+            <div class="field"><label for="gPhone" class="req">Phone (WhatsApp if possible)</label><input id="gPhone" name="gPhone" type="tel" inputmode="tel" autocomplete="tel" placeholder="0771 234 567" required><div class="err"></div></div>
+            <div class="field"><label for="gEmail">Email (optional)</label><input id="gEmail" name="gEmail" type="email" autocomplete="email"><div class="err"></div></div>
+          </div>
+        </fieldset>
+
+        <div class="field"><label class="check"><input type="checkbox" name="consent" required> <span>I confirm the details are correct and agree that the school may call me to confirm this request.</span></label><div class="err"></div></div>
+        <button class="btn btn-navy btn-block" id="apply-btn" type="submit">Send registration request</button>
+      </form>
+
+      <div id="apply-success" hidden aria-live="polite">
+        <div class="alert ok"><strong>Request received.</strong> Thank you.</div>
+        <p>Your reference number:</p>
+        <div class="ref" id="ref-number"></div>
+        <p class="small muted" style="margin-top:10px">The school will confirm by phone. Keep this number in case you need to call us on <span id="success-phone"></span>.</p>
+        <p class="small" id="success-extra"></p>
+        <div class="actions"><button type="button" class="btn btn-gold" id="copy-ref">Copy number</button><a class="btn btn-ghost" style="color:var(--navy)" href="index.html">Back to home</a></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+<div id="site-footer"></div>
+<script type="module" src="js/site/register.js"></script>
+</body>
+</html>

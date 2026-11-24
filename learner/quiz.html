@@ -1,0 +1,58 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Quiz · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* learner/quiz.html?id= — take a quiz: timer, answers saved as you go (local copy + Firestore, resilient to network drops), auto-submit at time limit.
+   Role: learner. Collections: quizzes, quizzes/{id}/questions, quizAttempts */
+import { requireRole } from '../shared/auth.js';
+import { renderShell, esc, toast, confirmBox, setLoading } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, list, getMyLearner, toMs, gradeAnswer } from './js/common.js';
+const { collection, doc, getDoc, getDocs, addDoc, updateDoc, serverTimestamp, where } = fs;
+const hash = s => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7);
+requireRole(['learner'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'learner', title: 'Quiz', nav: NAV });
+  const msg = (t, h = '') => (main.innerHTML = `<div class="tcard"><h3>${esc(t)}</h3>${h}<p><a class="tbtn alt" href="quizzes.html">Back to quizzes</a></p></div>`);
+  main.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const id = new URLSearchParams(location.search).get('id'), l = await getMyLearner(p);
+    const qd = id ? await getDoc(doc(db, 'quizzes', id)) : null;
+    if (!l || !qd || !qd.exists() || qd.data().classId !== l.classId || qd.data().status === 'draft') return msg('Quiz not found');
+    const quiz = { id, ...qd.data() }, now = Date.now(), o = toMs(quiz.opensAt), c = toMs(quiz.closesAt);
+    const [snap, atts] = await Promise.all([getDocs(collection(db, 'quizzes', id, 'questions')), list('quizAttempts', where('quizId', '==', id), where('learnerId', '==', l.id))]);
+    let qs = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => a.order - b.order);
+    const closed = quiz.status === 'closed' || (c && c < now);
+    const showResult = att => {
+      const reveal = quiz.showAnswersAfter === 'immediate' || (quiz.showAnswersAfter === 'afterClose' && closed), hasLong = qs.some(q => q.type === 'long');
+      main.innerHTML = `<div class="tcard"><h3>${esc(quiz.title)}</h3>${quiz.showAnswersAfter === 'never' ? '<p>Submitted. Your teacher will share results.</p>' : `<div class="big">${esc(att.totalScore ?? 0)} / ${esc(quiz.outOf)}</div>${hasLong && att.status !== 'marked' ? '<p class="muted">Long answers are still being marked.</p>' : ''}`}</div>${reveal ? qs.map(q => `<div class="tcard" style="margin-top:8px"><strong>${esc(q.text)}</strong><p>Your answer: ${esc((att.answers || {})[q.id] ?? '–')}</p>${q.type !== 'long' ? `<p class="muted">Correct: ${esc(q.answer)}</p>` : ''}</div>`).join('') : quiz.showAnswersAfter === 'afterClose' ? '<p class="muted">Answers appear after the quiz closes.</p>' : ''}<p><a class="tbtn alt" href="quizzes.html">Back to quizzes</a></p>`;
+    };
+    let att = atts.find(a => a.status === 'in_progress');
+    if (!att) {
+      const done = atts.filter(a => a.status !== 'in_progress');
+      if (closed || (o && o > now) || done.length >= quiz.attemptsAllowed) { if (done.length) return showResult(done.sort((a, b) => (b.totalScore || 0) - (a.totalScore || 0))[0]); return msg(closed ? 'This quiz is closed' : o && o > now ? 'This quiz has not opened yet' : 'No attempts left'); }
+      main.innerHTML = `<div class="tcard"><h3>${esc(quiz.title)}</h3><p>${esc(quiz.instructions || '')}</p><p class="muted">${quiz.timeLimitMin ? esc(quiz.timeLimitMin) + ' minutes. ' : ''}Attempt ${done.length + 1} of ${esc(quiz.attemptsAllowed)}. The timer starts when you tap Start.</p><button class="tbtn" id="st">Start quiz</button></div>`;
+      await new Promise(r => (main.querySelector('#st').onclick = r));
+      const d = { quizId: id, learnerId: l.id, answers: {}, startedAt: new Date().toISOString(), submittedAt: null, autoScore: 0, manualScore: 0, totalScore: 0, status: 'in_progress', createdAt: serverTimestamp(), createdBy: p.uid, updatedAt: serverTimestamp() };
+      att = { id: (await addDoc(collection(db, 'quizAttempts'), d)).id, ...d };
+    }
+    if (quiz.shuffle) qs = [...qs].sort((a, b) => hash(att.id + a.id) - hash(att.id + b.id));
+    const key = 'ffq_' + att.id; let ans = { ...(att.answers || {}) }; try { Object.assign(ans, JSON.parse(localStorage.getItem(key) || '{}')); } catch (e) {}
+    const ends = [quiz.timeLimitMin ? toMs(att.startedAt) + quiz.timeLimitMin * 60000 : null, c].filter(Boolean), deadline = ends.length ? Math.min(...ends) : null;
+    main.innerHTML = `<div class="tcard" style="position:sticky;top:0;z-index:5"><strong>${esc(quiz.title)}</strong> <span class="pill" id="tm"></span> <span class="muted" id="sv"></span></div><form id="f">${qs.map((q, i) => `<div class="tcard" style="margin-top:8px"><p><strong>${i + 1}. ${esc(q.text)}</strong> <span class="muted">(${esc(q.marks)})</span></p>${q.type === 'mcq' || q.type === 'truefalse' ? (q.type === 'mcq' ? q.options : ['True', 'False']).map(op => `<label style="display:block;min-height:44px"><input type="radio" name="${esc(q.id)}" value="${esc(op)}" ${String(ans[q.id]).toLowerCase() === op.toLowerCase() ? 'checked' : ''}> ${esc(op)}</label>`).join('') : q.type === 'short' ? `<input class="tin" name="${esc(q.id)}" style="width:100%" value="${esc(ans[q.id] || '')}">` : `<textarea class="tin" name="${esc(q.id)}" rows="5" style="width:100%">${esc(ans[q.id] || '')}</textarea>`}</div>`).join('')}<p><button class="tbtn" id="sb">Submit quiz</button></p></form>`;
+    const $ = x => main.querySelector('#' + x); let dirty = false, over = false;
+    const collect = () => { qs.forEach(q => { const el = [...main.querySelectorAll(`[name="${q.id}"]`)]; const v = q.type === 'mcq' || q.type === 'truefalse' ? (el.find(x => x.checked) || {}).value : el[0].value; if (v !== undefined && v !== '') ans[q.id] = v; }); try { localStorage.setItem(key, JSON.stringify(ans)); } catch (e) {} };
+    const push = async () => { if (!dirty || over) return; dirty = false; try { await updateDoc(doc(db, 'quizAttempts', att.id), { answers: ans, updatedAt: serverTimestamp() }); $('sv').textContent = 'Saved'; } catch (e) { dirty = true; $('sv').textContent = 'Offline: saved on this device'; } };
+    $('f').oninput = () => { collect(); dirty = true; $('sv').textContent = 'Saving…'; };
+    const sync = setInterval(push, 5000);
+    async function submit(auto) {
+      if (over) return; if (!auto && !(await confirmBox('Submit your answers now?'))) return;
+      over = true; clearInterval(sync); clearInterval(tick); collect(); setLoading($('sb'), true);
+      const auto_ = qs.reduce((s, q) => s + gradeAnswer(q, ans[q.id]), 0), hasLong = qs.some(q => q.type === 'long');
+      const d = { answers: ans, submittedAt: new Date().toISOString(), autoScore: auto_, totalScore: auto_, status: hasLong ? 'submitted' : 'marked', updatedAt: serverTimestamp() };
+      for (let t = 0; ; t++) { try { await updateDoc(doc(db, 'quizAttempts', att.id), d); break; } catch (e) { if (t > 5) { over = false; toast('Could not submit. Check your connection and tap Submit again.', 'error'); setLoading($('sb'), false); return; } await new Promise(r => setTimeout(r, 1500)); } }
+      try { localStorage.removeItem(key); } catch (e) {} if (auto) toast('Time is up. Your quiz was submitted.', 'info'); showResult({ ...att, ...d });
+    }
+    $('f').onsubmit = e => { e.preventDefault(); submit(false); };
+    const tick = setInterval(() => { if (!deadline) { $('tm').textContent = 'No time limit'; return; } const s = Math.max(0, Math.round((deadline - Date.now()) / 1000)); $('tm').textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} left`; if (s <= 0) submit(true); }, 1000);
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load the quiz. Refresh and try again.</div>'; }
+});
+</script></body></html>

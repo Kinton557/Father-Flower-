@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Projects | SDC</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * sdc/projects.html
+ * Purpose: development projects with budget, spent, progress, contractor and photos.
+ * Role allowed: sdc, admin.
+ * Collections used: sdcProjects. Photos go through saveFile().
+ */
+import { esc } from '../shared/ui.js';
+import { crudPage } from '../bursar/js/crud.js';
+import { SDC_NAV, usd } from '../bursar/js/common.js';
+
+const safeImg = (u) => /^(https:\/\/|data:image\/)/.test(String(u || ''));
+const LABEL = { planned: 'Planned', in_progress: 'In progress', completed: 'Completed', on_hold: 'On hold' };
+
+crudPage({
+  roles: ['sdc', 'admin'],
+  nav: SDC_NAV,
+  title: 'Development projects',
+  collection: 'sdcProjects',
+  newLabel: 'Add project',
+  empty: 'No projects yet.',
+  auditSave: true,
+  defaults: () => ({ status: 'planned', progress: 0 }),
+  sort: (a, b) => (a.status === 'completed') - (b.status === 'completed') || (a.name || '').localeCompare(b.name || ''),
+  fields: [
+    { key: 'name', label: 'Project name', type: 'text', required: true, max: 120 },
+    { key: 'status', label: 'Status', type: 'select', required: true, options: Object.entries(LABEL).map(([v, l]) => ({ v, l })) },
+    { key: 'description', label: 'Description', type: 'textarea', wide: true },
+    { key: 'budgetCents', label: 'Budget (USD)', type: 'money', required: true },
+    { key: 'spentCents', label: 'Spent so far (USD)', type: 'money' },
+    { key: 'progress', label: 'Progress (%)', type: 'number', required: true, min: 0, max: 100 },
+    { key: 'contractor', label: 'Contractor', type: 'text', max: 120 },
+    { key: 'contractorPhone', label: 'Contractor phone', type: 'text', max: 30 },
+    { key: 'startDate', label: 'Start date', type: 'date' },
+    { key: 'endDate', label: 'Expected finish', type: 'date' },
+    { key: 'photos', label: 'Progress photos', type: 'images', wide: true }
+  ],
+  columns: [
+    { label: 'Project', html: (r) => `<strong>${esc(r.name)}</strong><br><small>${esc(r.contractor || 'No contractor yet')}</small>` },
+    { label: 'Status', html: (r) => `<span class="b-tag ${r.status === 'completed' ? 'ok' : r.status === 'on_hold' ? 'warn' : ''}">${esc(LABEL[r.status] || r.status)}</span>` },
+    { label: 'Budget', type: 'money', key: 'budgetCents' }, { label: 'Spent', type: 'money', key: 'spentCents' },
+    { label: 'Progress', html: (r) => `<div role="progressbar" aria-valuenow="${Number(r.progress) || 0}" aria-valuemin="0" aria-valuemax="100" aria-label="Progress" style="height:10px;min-width:90px;border-radius:8px;background:var(--b-soft);overflow:hidden"><div style="height:100%;width:${Math.min(100, Number(r.progress) || 0)}%;background:var(--gold,#C9A24A)"></div></div><small>${Number(r.progress) || 0}%</small>` },
+    { label: 'Photos', html: (r) => ((r.photos || []).filter(safeImg).slice(0, 3).map((u) => `<img src="${esc(u)}" alt="Project photo" width="48" height="48" loading="lazy" style="object-fit:cover;border-radius:8px;margin-right:4px">`).join('') || 'None') }
+  ],
+  validate: async (d) => {
+    if (d.startDate && d.endDate && d.endDate < d.startDate) throw new Error('The finish date cannot be before the start date.');
+    if (d.spentCents > d.budgetCents * 1.5) throw new Error('Spent is far above budget. Please check the amounts.');
+    if (d.status === 'completed') d.progress = 100;
+  },
+  summary: async (rows) => {
+    const b = rows.reduce((s, r) => s + (r.budgetCents || 0), 0), sp = rows.reduce((s, r) => s + (r.spentCents || 0), 0);
+    return `<div class="b-cards"><div class="b-card"><div class="k">Projects</div><div class="v">${rows.length}</div></div><div class="b-card"><div class="k">Total budget</div><div class="v">${usd(b)}</div></div><div class="b-card"><div class="k">Spent</div><div class="v">${usd(sp)}</div></div></div>`;
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,58 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Report comments · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* teacher/comments.html — purpose: class teacher writes report comments; compile/refresh draft reports.
+   Role: class teacher (classes.classTeacherUid == uid), admin. Collections: classes, learners, reports, (engine: marks, assessments, attendance) */
+import { requireRole, audit } from '../shared/auth.js';
+import { renderShell, esc, toast, setLoading } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, list, loadContext } from './js/common.js';
+import { compileReports } from './js/reportEngine.js';
+const { doc, writeBatch, serverTimestamp, where } = fs;
+requireRole(['teacher', 'admin'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'teacher', title: 'Report comments', nav: NAV });
+  try {
+    const ctx = await loadContext(p);
+    if (!ctx.term) { main.innerHTML = '<div class="tcard">No current term set.</div>'; return; }
+    const classes = p.role === 'admin' ? await list('classes') : await list('classes', where('classTeacherUid', '==', p.uid));
+    if (!classes.length) { main.innerHTML = '<div class="tcard">You are not set as a class teacher for any class.</div>'; return; }
+    main.innerHTML = `<div class="trow"><label>Class<select id="c">${classes.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select></label><button class="tbtn alt" id="cp">Compile / refresh reports</button></div><div id="g"></div>`;
+    const $ = id => main.querySelector('#' + id);
+    async function show() {
+      $('g').innerHTML = '<p class="muted">Loading…</p>';
+      try {
+        const cid = $('c').value;
+        const [ls, reps] = await Promise.all([list('learners', where('classId', '==', cid), where('status', '==', 'active')), list('reports', where('classId', '==', cid), where('termId', '==', ctx.term.id))]);
+        ls.sort((a, b) => a.fullName.localeCompare(b.fullName));
+        const rm = {}; reps.forEach(r => (rm[r.learnerId] = r));
+        $('g').innerHTML = ls.map(l => { const r = rm[l.id], ok = r && r.status === 'draft';
+          return `<div class="tcard" style="margin-bottom:8px"><strong>${esc(l.fullName)}</strong> <span class="muted">${esc(l.regNumber)}</span> ${r ? `<span class="pill">${esc(r.status)}</span>` : '<span class="pill">no report yet</span>'}
+          <textarea class="tin cm" data-id="${esc(l.id)}" rows="2" maxlength="400" style="width:100%;box-sizing:border-box;margin-top:6px" ${ok ? '' : 'disabled'} aria-label="Comment for ${esc(l.fullName)}">${esc(r ? r.classTeacherComment || '' : '')}</textarea></div>`; }).join('')
+          + (ls.length ? '<button class="tbtn" id="sv">Save comments</button>' : '<p class="muted">No active learners.</p>')
+          + (reps.length < ls.length ? '<p class="muted">Tap "Compile / refresh reports" so every learner has a draft report before commenting.</p>' : '');
+        const sv = $('sv'); if (!sv) return;
+        sv.onclick = async () => {
+          const boxes = [...main.querySelectorAll('textarea:not([disabled])')]; if (!boxes.length) return toast('Nothing editable.', 'info');
+          setLoading(sv, true);
+          try {
+            let b = writeBatch(db), n = 0;
+            for (const t of boxes) { b.update(doc(db, 'reports', ctx.term.id + '_' + t.dataset.id), { classTeacherComment: t.value.trim(), updatedAt: serverTimestamp() }); if (++n >= 400) { await b.commit(); b = writeBatch(db); n = 0; } }
+            if (n) await b.commit();
+            await audit('save_report_comments', 'classes/' + cid, { count: boxes.length }); toast('Comments saved', 'success');
+          } catch (e) { console.error(e); toast('Save failed. Try again.', 'error'); }
+          setLoading(sv, false);
+        };
+      } catch (e) { console.error(e); $('g').innerHTML = '<p class="muted">Could not load.</p>'; }
+    }
+    $('c').onchange = show;
+    $('cp').onclick = async () => {
+      setLoading($('cp'), true);
+      try { const r = await compileReports($('c').value, ctx.term.id); toast(`Compiled ${r.compiled} reports, ${r.missing.length} marks missing`, r.missing.length ? 'info' : 'success'); await show(); }
+      catch (e) { console.error(e); toast('Could not compile reports.', 'error'); }
+      setLoading($('cp'), false);
+    };
+    show();
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load. Refresh and try again.</div>'; }
+});
+</script></body></html>

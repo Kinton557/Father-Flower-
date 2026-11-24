@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Backup · Admin</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: export key collections to JSON or CSV (first 1000 documents each). Role: admin. Collections: read-only on the list below.
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell, setLoading } from '../shared/ui.js';
+import { ADMIN_NAV } from './js/nav.js';
+const COLS = ['users','campuses','terms','classes','subjects','allocations','learners','assessments','marks','reports','attendance','admissions','notices','news','payments','accounts','discipline'];
+const plain = v => v?.toDate ? v.toDate().toISOString() : Array.isArray(v) ? v.map(plain) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, plain(x)])) : v;
+const save = (name, text, type) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); };
+A.requireRole(['admin'], () => {
+  const main = renderShell({ role: 'admin', title: 'Backup', nav: ADMIN_NAV });
+  main.innerHTML = `<p>Each export holds up to 1000 documents. Keep downloads somewhere safe: they contain personal data.</p>` + COLS.map(c => `<div class="card" style="padding:10px 16px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center"><span>${esc(c)}</span><span><button class="btn" style="min-height:44px" data-c="${c}" data-f="json">JSON</button> <button class="btn" style="min-height:44px" data-c="${c}" data-f="csv">CSV</button></span></div>`).join('');
+  main.addEventListener('click', async e => {
+    const b = e.target.closest('[data-c]'); if (!b) return; setLoading(b, true);
+    try {
+      const docs = (await fs.getDocs(fs.query(fs.collection(db, b.dataset.c), fs.limit(1000)))).docs.map(d => ({ id: d.id, ...plain(d.data()) }));
+      if (!docs.length) toast('That collection is empty.', 'info');
+      else if (b.dataset.f === 'json') save(b.dataset.c + '.json', JSON.stringify(docs, null, 1), 'application/json');
+      else { const keys = [...new Set(docs.flatMap(Object.keys))], q = v => '"' + (typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v ?? '')).replace(/"/g, '""') + '"'; save(b.dataset.c + '.csv', [keys.map(q).join(','), ...docs.map(d => keys.map(k => q(d[k])).join(','))].join('\n'), 'text/csv'); }
+      await A.audit('backup.export', b.dataset.c, { format: b.dataset.f, count: docs.length });
+    } catch (x) { console.error(x); toast('Export failed. Try again.', 'error'); }
+    setLoading(b, false);
+  });
+});
+</script></body></html>

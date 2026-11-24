@@ -1,0 +1,49 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teacher home · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* teacher/index.html — purpose: teacher home. Role: teacher, admin.
+   Collections: allocations, assessments, learners, marks, assignments, terms */
+import { requireRole } from '../shared/auth.js';
+import { renderShell, esc, fmtDate } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, list, loadContext } from './js/common.js';
+const { where } = fs;
+requireRole(['teacher', 'admin'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'teacher', title: 'My classes', nav: NAV });
+  main.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const ctx = await loadContext(p);
+    if (!ctx.term) { main.innerHTML = '<div class="tcard"><h3>No current term</h3><p class="muted">Ask the admin to set the current term.</p></div>'; return; }
+    const today = new Date().toISOString().slice(0, 10);
+    const cards = await Promise.all(ctx.allocations.slice(0, 50).map(async a => {
+      const [asms, learners, marks] = await Promise.all([
+        list('assessments', where('allocationId', '==', a.id)),
+        list('learners', where('classId', '==', a.classId), where('status', '==', 'active')),
+        list('marks', where('classId', '==', a.classId), where('subjectId', '==', a.subjectId), where('termId', '==', ctx.term.id))
+      ]);
+      const missing = Math.max(0, asms.length * learners.length - marks.length);
+      return { a, asms: asms.length, learners: learners.length, missing };
+    }));
+    const totalMissing = cards.reduce((t, c) => t + c.missing, 0);
+    let due = [];
+    if (p.role === 'teacher') due = (await list('assignments', where('createdBy', '==', p.uid), where('termId', '==', ctx.term.id))).filter(x => x.dueDate >= today).sort((a, b) => a.dueDate < b.dueDate ? -1 : 1).slice(0, 5);
+    main.innerHTML = `
+      <p class="muted">Term ${esc(ctx.term.term)}, ${esc(ctx.term.year)}${ctx.term.marksLocked ? ' · <strong>marks locked</strong>' : ''}</p>
+      <div class="tgrid">
+        <div class="tcard"><div class="big">${cards.length}</div><div class="muted">class &amp; subject allocations</div></div>
+        <div class="tcard"><div class="big">${totalMissing}</div><div class="muted">marks still to enter</div></div>
+        <div class="tcard"><div class="big">${due.length}</div><div class="muted">assignment deadlines ahead</div></div>
+      </div>
+      <h2>Quick actions</h2>
+      <div class="trow"><a class="tbtn" href="marks.html">Enter marks</a><a class="tbtn alt" href="assessments.html">New assessment</a><a class="tbtn alt" href="attendance.html">Take register</a><a class="tbtn alt" href="quizzes.html">Build quiz</a></div>
+      <h2>My classes</h2>
+      <div class="tgrid">${cards.map(c => `<div class="tcard"><h3>${esc(ctx.label(c.a))}</h3>
+        <div class="muted">${c.learners} learners · ${c.asms} assessments</div>
+        <p><span class="pill">${c.missing} marks missing</span></p>
+        <a class="tbtn alt" href="marksheet.html?al=${encodeURIComponent(c.a.id)}">Mark sheet</a></div>`).join('') || '<div class="tcard muted">No allocations yet for this term.</div>'}</div>
+      <h2>Upcoming deadlines</h2>
+      ${due.map(d => `<div class="tcard" style="margin-bottom:8px"><strong>${esc(d.title)}</strong> <span class="muted">due ${esc(fmtDate(d.dueDate))}</span></div>`).join('') || '<p class="muted">No upcoming deadlines.</p>'}`;
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard"><h3>Could not load</h3><p class="muted">Check your connection and refresh.</p></div>'; }
+});
+</script></body></html>

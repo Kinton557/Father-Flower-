@@ -1,0 +1,69 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Assessments · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* teacher/assessments.html — purpose: create/list/delete assessments for an allocation. Role: teacher (own), admin.
+   Collections: allocations, assessments, marks, terms */
+import { requireRole, audit } from '../shared/auth.js';
+import { renderShell, esc, toast, confirmBox, fmtDate, setLoading } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, list, loadContext } from './js/common.js';
+const { collection, doc, addDoc, deleteDoc, serverTimestamp, where } = fs;
+requireRole(['teacher', 'admin'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'teacher', title: 'Assessments', nav: NAV });
+  try {
+    const ctx = await loadContext(p);
+    if (!ctx.term) { main.innerHTML = '<div class="tcard">No current term set.</div>'; return; }
+    main.innerHTML = `<div class="trow"><label>Class &amp; subject<select id="al"></select></label></div>
+    <form id="f" class="tcard" novalidate><h3>New assessment</h3><div class="trow">
+      <label>Title<input id="t" required maxlength="80" placeholder="Test 1"></label>
+      <label>Type<select id="ty"><option value="test">Test</option><option value="assignment">Assignment</option><option value="quiz">Quiz</option><option value="exam">Exam</option></select></label>
+      <label>Out of<input id="o" type="number" inputmode="decimal" min="1" step="any" required></label>
+      <label>Weight % (optional)<input id="w" type="number" inputmode="decimal" min="0" max="100" step="any"></label>
+      <label>Date<input id="d" type="date" required></label></div>
+      <p class="muted">Leave weight empty to use the default split (40% coursework, 60% exam).</p>
+      <button class="tbtn" id="go">Create assessment</button></form>
+    <h2>Existing</h2><div id="ls"><p class="muted">Loading…</p></div>`;
+    const $ = id => main.querySelector('#' + id);
+    $('al').innerHTML = ctx.allocations.map(a => `<option value="${esc(a.id)}">${esc(ctx.label(a))}</option>`).join('') || '<option value="">No allocations</option>';
+    $('d').value = new Date().toISOString().slice(0, 10);
+    const cur = () => ctx.allocations.find(a => a.id === $('al').value);
+    async function show() {
+      const a = cur(); if (!a) { $('ls').innerHTML = '<p class="muted">No allocation selected.</p>'; return; }
+      $('ls').innerHTML = '<p class="muted">Loading…</p>';
+      try {
+        const rows = (await list('assessments', where('allocationId', '==', a.id))).sort((x, y) => (x.date < y.date ? 1 : -1));
+        $('ls').innerHTML = rows.length ? `<table class="tbl"><thead><tr><th>Title</th><th>Type</th><th>Out of</th><th>Weight</th><th>Date</th><th></th></tr></thead><tbody>${rows.map(r => `<tr>
+          <td data-l="Title">${esc(r.title)}</td><td data-l="Type">${esc(r.type)}</td><td data-l="Out of">${esc(r.outOf)}</td><td data-l="Weight">${r.weightPercent ? esc(r.weightPercent) + '%' : '–'}</td><td data-l="Date">${esc(fmtDate(r.date))}</td>
+          <td><a class="tbtn alt" href="marks.html?a=${encodeURIComponent(r.id)}">Marks</a> <button class="tbtn danger" data-del="${esc(r.id)}">Delete</button></td></tr>`).join('')}</tbody></table>` : '<p class="muted">No assessments yet. Create the first one above.</p>';
+      } catch (e) { console.error(e); $('ls').innerHTML = '<p class="muted">Could not load assessments.</p>'; }
+    }
+    $('al').onchange = show;
+    $('ls').onclick = async e => {
+      const id = e.target.dataset && e.target.dataset.del; if (!id) return;
+      if (ctx.term.marksLocked) return toast('Marks are locked for this term.', 'error');
+      if (!(await confirmBox('Delete this assessment? Existing marks for it will no longer count.'))) return;
+      try { await deleteDoc(doc(db, 'assessments', id)); await audit('delete_assessment', 'assessments/' + id, {}); toast('Deleted', 'success'); show(); }
+      catch (err) { console.error(err); toast('Could not delete.', 'error'); }
+    };
+    $('f').onsubmit = async e => {
+      e.preventDefault();
+      const a = cur(); if (!a) return toast('Choose a class and subject.', 'error');
+      if (ctx.term.marksLocked) return toast('Marks are locked for this term.', 'error');
+      const title = $('t').value.trim(), outOf = Number($('o').value), w = $('w').value === '' ? 0 : Number($('w').value), date = $('d').value;
+      if (!title) return toast('Enter a title.', 'error');
+      if (!(outOf > 0)) return toast('"Out of" must be greater than 0.', 'error');
+      if (w < 0 || w > 100) return toast('Weight must be 0 to 100.', 'error');
+      if (!date) return toast('Choose a date.', 'error');
+      setLoading($('go'), true);
+      try {
+        const ref = await addDoc(collection(db, 'assessments'), { allocationId: a.id, classId: a.classId, subjectId: a.subjectId, termId: ctx.term.id, type: $('ty').value, title, outOf, weightPercent: w, date, source: 'manual', createdAt: serverTimestamp(), createdBy: p.uid, updatedAt: serverTimestamp() });
+        await audit('create_assessment', 'assessments/' + ref.id, { title, outOf });
+        toast('Assessment created', 'success'); $('t').value = ''; show();
+      } catch (err) { console.error(err); toast('Could not save. Try again.', 'error'); }
+      setLoading($('go'), false);
+    };
+    show();
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load. Refresh and try again.</div>'; }
+});
+</script></body></html>

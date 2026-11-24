@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Roll call | Boarding</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * boarding/register.html
+ * Purpose: boarding roll call (morning, evening, lights-out) per hostel. Missing boarders are flagged at once.
+ * Role allowed: boarding, admin.
+ * Collections used: boardingRegister (id = hostelId_date_session), learners (boarders), exeats, sickbay, hostels.
+ */
+import { requireRole, audit } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell } from '../shared/ui.js';
+import { BOARDING_NAV, SESSIONS, scopeWhere, loadHostels, todayISO, showErr } from '../bursar/js/common.js';
+
+const STATES = [['present', 'Present'], ['absent', 'Missing'], ['sickbay', 'Sick bay'], ['exeat', 'Exeat']];
+
+requireRole(['boarding', 'admin'], async (profile) => {
+  const main = renderShell({ role: profile.role, title: 'Roll call', nav: BOARDING_NAV });
+  main.innerHTML = `<div class="b-head"><h1>Roll call</h1></div>
+    <div class="b-filters"><label>Hostel<select id="h"></select></label><label>Date<input type="date" id="d" value="${todayISO()}" max="${todayISO()}"></label>
+    <label>Session<select id="s">${SESSIONS.map((s) => `<option value="${s.id}">${s.l}</option>`).join('')}</select></label></div>
+    <div id="alert"></div><div id="sheet"><div class="b-skel"></div></div>`;
+  const $ = (s) => main.querySelector(s);
+  let hostels = [];
+  try { hostels = await loadHostels(profile); } catch (e) { showErr($('#sheet'), e); return; }
+  if (!hostels.length) { $('#sheet').innerHTML = '<div class="b-empty">No hostels yet. Add one on the Hostels and beds page.</div>'; return; }
+  $('#h').innerHTML = hostels.map((h) => `<option value="${esc(h.id)}">${esc(h.name)}</option>`).join('');
+  const hr = new Date().getHours();
+  $('#s').value = hr < 11 ? 'morning' : hr < 21 ? 'evening' : 'lights_out';
+
+  let learners = [], records = {}, hostel = null, existing = null;
+
+  async function load() {
+    const sheet = $('#sheet');
+    sheet.innerHTML = '<div class="b-skel"></div>';
+    $('#alert').innerHTML = '';
+    try {
+      hostel = hostels.find((h) => h.id === $('#h').value);
+      const date = $('#d').value, session = $('#s').value;
+      const base = scopeWhere(profile);
+      const campusId = hostel.campusId;
+      const [lSnap, regSnap, exSnap, sbSnap] = await Promise.all([
+        fs.getDocs(fs.query(fs.collection(db, 'learners'), fs.where('campusId', '==', campusId), fs.where('hostelId', '==', hostel.id), fs.limit(300))),
+        fs.getDoc(fs.doc(db, 'boardingRegister', `${hostel.id}_${date}_${session}`)),
+        fs.getDocs(fs.query(fs.collection(db, 'exeats'), fs.where('campusId', '==', campusId), fs.where('status', '==', 'out'), fs.limit(200))),
+        fs.getDocs(fs.query(fs.collection(db, 'sickbay'), fs.where('campusId', '==', campusId), fs.where('status', '==', 'admitted'), fs.limit(100)))
+      ]);
+      learners = lSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((l) => (l.status || 'active') === 'active' && l.boarding).sort((a, b) => (a.fullName || '').localeCompare(b.fullName || ''));
+      existing = regSnap.exists() ? regSnap.data() : null;
+      const out = new Set(exSnap.docs.map((d) => d.data().learnerId));
+      const sick = new Set(sbSnap.docs.map((d) => d.data().learnerId));
+      records = {};
+      learners.forEach((l) => { records[l.id] = (existing && existing.records && existing.records[l.id]) || (sick.has(l.id) ? 'sickbay' : out.has(l.id) ? 'exeat' : ''); });
+      draw();
+    } catch (e) { showErr(sheet, e); }
+  }
+
+  function draw() {
+    const sheet = $('#sheet');
+    if (!learners.length) { sheet.innerHTML = '<div class="b-empty">No boarders are allocated to this hostel yet. Allocate beds first.</div>'; return; }
+    const counts = { present: 0, absent: 0, sickbay: 0, exeat: 0, '': 0 };
+    Object.values(records).forEach((v) => { counts[v] = (counts[v] || 0) + 1; });
+    sheet.innerHTML = `${existing ? '<p class="b-alert" role="status">A roll call was already saved for this session. Saving again will update it.</p>' : ''}
+      <div class="b-cards"><div class="b-card"><div class="k">Present</div><div class="v">${counts.present}</div></div><div class="b-card"><div class="k">Missing</div><div class="v ${counts.absent ? 'b-pos' : ''}">${counts.absent}</div></div><div class="b-card"><div class="k">Sick bay</div><div class="v">${counts.sickbay}</div></div><div class="b-card"><div class="k">Exeat</div><div class="v">${counts.exeat}</div></div><div class="b-card"><div class="k">Not marked</div><div class="v">${counts['']}</div></div></div>
+      <div class="b-actions" style="margin:0 0 12px"><button class="b-btn b-ghost" id="allp" type="button">Mark all unmarked present</button><button class="b-btn" id="save" type="button">Save roll call</button></div>
+      <table class="b-table stack"><thead><tr><th>Learner</th><th>Bed</th><th>Status</th></tr></thead><tbody>
+      ${learners.map((l) => `<tr><td data-label="Learner">${esc(l.fullName)}<br><small>${esc(l.regNumber || l.id)}</small></td><td data-label="Bed">${esc(l.bedId || '')}</td>
+        <td data-label="Status"><div class="b-seg" data-l="${esc(l.id)}">${STATES.map(([v, t]) => `<button type="button" data-v="${v}" class="${v === 'absent' ? 'bad' : ''}" aria-pressed="${records[l.id] === v}">${t}</button>`).join('')}</div></td></tr>`).join('')}</tbody></table>`;
+    sheet.querySelectorAll('[data-l]').forEach((g) => g.addEventListener('click', (e) => { const b = e.target.closest('[data-v]'); if (!b) return; records[g.dataset.l] = b.dataset.v; draw(); }));
+    sheet.querySelector('#allp').addEventListener('click', () => { learners.forEach((l) => { if (!records[l.id]) records[l.id] = 'present'; }); draw(); });
+    sheet.querySelector('#save').addEventListener('click', save);
+  }
+
+  async function save() {
+    const unmarked = learners.filter((l) => !records[l.id]);
+    if (unmarked.length) { toast(`${unmarked.length} learner(s) are not marked yet.`, 'error'); return; }
+    const btn = $('#save'); btn.disabled = true;
+    try {
+      const date = $('#d').value, session = $('#s').value;
+      const id = `${hostel.id}_${date}_${session}`;
+      const absent = learners.filter((l) => records[l.id] === 'absent');
+      const payload = { hostelId: hostel.id, campusId: hostel.campusId, date, session, records, absentCount: absent.length, absentIds: absent.map((l) => l.id), absentNames: absent.map((l) => l.fullName),
+        takenBy: profile.uid, takenByName: profile.fullName || '', updatedAt: fs.serverTimestamp() };
+      if (!existing) { payload.createdAt = fs.serverTimestamp(); payload.createdBy = profile.uid; }
+      await fs.setDoc(fs.doc(db, 'boardingRegister', id), payload, { merge: true });
+      if (absent.length) await audit('boarding.missing', `boardingRegister/${id}`, { names: absent.map((l) => l.fullName) });
+      existing = { ...payload };
+      toast('Roll call saved', 'success');
+      $('#alert').innerHTML = absent.length ? `<p class="b-err" role="alert"><strong>${absent.length} missing boarder(s):</strong> ${esc(absent.map((l) => `${l.fullName} (${l.bedId || 'no bed'})`).join(', '))}. The deputy head can see this now.</p>` : '<p class="b-alert" role="status">Everyone is accounted for.</p>';
+      draw();
+    } catch (e) { toast('Could not save: ' + (e.message || ''), 'error'); btn.disabled = false; }
+  }
+
+  ['h', 'd', 's'].forEach((k) => $('#' + k).addEventListener('change', load));
+  load();
+});
+</script>
+</body>
+</html>

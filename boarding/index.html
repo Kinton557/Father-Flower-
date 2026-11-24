@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Boarding overview | Father Flower</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * boarding/index.html
+ * Purpose: boarding home. Boarders today (present, sick bay, exeat), vacancies and alerts.
+ * Role allowed: boarding, admin.
+ * Collections used: learners (boarders only), hostels, boardingRegister, exeats, sickbay.
+ */
+import { requireRole } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, renderShell } from '../shared/ui.js';
+import { BOARDING_NAV, scopeWhere, loadBoarders, loadHostels, bedsIn, todayISO, SESSIONS, showErr } from '../bursar/js/common.js';
+
+requireRole(['boarding', 'admin'], async (profile) => {
+  const main = renderShell({ role: profile.role, title: 'Boarding', nav: BOARDING_NAV });
+  main.innerHTML = `<div class="b-head"><h1>Boarding today</h1><a class="b-btn" href="register.html">Take roll call</a></div>
+    <div id="alerts"></div>
+    <div class="b-cards" id="cards"><div class="b-skel"></div><div class="b-skel"></div><div class="b-skel"></div><div class="b-skel"></div></div>
+    <section class="b-panel"><h2 class="b-h2">Roll call status</h2><div id="roll"><div class="b-skel"></div></div></section>
+    <div class="b-actions"><a class="b-btn b-ghost" href="exeats.html">Exeats</a><a class="b-btn b-ghost" href="sickbay.html">Sick bay</a><a class="b-btn b-ghost" href="hostels.html">Hostels and beds</a><a class="b-btn b-ghost" href="visits.html">Visits</a></div>`;
+  const $ = (s) => main.querySelector(s);
+  try {
+    const base = scopeWhere(profile);
+    const [boarders, hostels, regSnap, exSnap, sbSnap] = await Promise.all([
+      loadBoarders(profile), loadHostels(profile),
+      fs.getDocs(fs.query(fs.collection(db, 'boardingRegister'), ...base, fs.where('date', '==', todayISO()), fs.limit(60))),
+      fs.getDocs(fs.query(fs.collection(db, 'exeats'), ...base, fs.where('status', '==', 'out'), fs.limit(200))),
+      fs.getDocs(fs.query(fs.collection(db, 'sickbay'), ...base, fs.where('status', '==', 'admitted'), fs.limit(100)))
+    ]);
+    const order = SESSIONS.map((s) => s.id);
+    const latest = {};
+    regSnap.docs.map((d) => d.data()).forEach((r) => { const cur = latest[r.hostelId]; if (!cur || order.indexOf(r.session) > order.indexOf(cur.session)) latest[r.hostelId] = r; });
+    const counts = { present: 0, absent: 0, sickbay: 0, exeat: 0 };
+    const missing = [];
+    Object.values(latest).forEach((r) => Object.values(r.records || {}).forEach((v) => { if (counts[v] !== undefined) counts[v]++; }));
+    Object.values(latest).forEach((r) => (r.absentNames || []).forEach((n) => missing.push(`${n} (${(hostels.find((h) => h.id === r.hostelId) || {}).name || 'hostel'}, ${SESSIONS.find((s) => s.id === r.session)?.l || r.session})`)));
+    const beds = hostels.reduce((s, h) => s + bedsIn(h), 0);
+    const allocated = boarders.filter((l) => l.hostelId && l.bedId).length;
+    const unallocated = boarders.length - allocated;
+    const now = new Date().toISOString();
+    const overdue = exSnap.docs.map((d) => d.data()).filter((e) => e.expectedReturn && e.expectedReturn < now);
+
+    const alerts = [];
+    if (missing.length) alerts.push(`<p class="b-err" role="alert"><strong>Missing at roll call:</strong> ${esc(missing.join('; '))}</p>`);
+    if (overdue.length) alerts.push(`<p class="b-alert" role="alert"><strong>${overdue.length} learner(s) overdue back from exeat:</strong> ${esc(overdue.map((e) => e.learnerName).join(', '))}</p>`);
+    if (unallocated) alerts.push(`<p class="b-alert">${unallocated} boarder(s) have no bed yet. <a href="hostels.html">Allocate beds</a>.</p>`);
+    if (hostels.length && !regSnap.size) alerts.push('<p class="b-alert">No roll call has been taken today yet.</p>');
+    $('#alerts').innerHTML = alerts.join('');
+
+    $('#cards').innerHTML = `
+      <div class="b-card"><div class="k">Boarders</div><div class="v">${boarders.length}</div></div>
+      <div class="b-card"><div class="k">Present at last roll call</div><div class="v">${counts.present}</div><div class="n">${counts.absent} missing</div></div>
+      <div class="b-card"><div class="k">In sick bay</div><div class="v">${sbSnap.size}</div></div>
+      <div class="b-card"><div class="k">On exeat now</div><div class="v">${exSnap.size}</div></div>
+      <div class="b-card"><div class="k">Vacant beds</div><div class="v">${Math.max(0, beds - allocated)}</div><div class="n">${beds} beds in ${hostels.length} hostel(s)</div></div>`;
+
+    $('#roll').innerHTML = hostels.length ? `<table class="b-table stack"><thead><tr><th>Hostel</th><th>Last session today</th><th class="b-num">Present</th><th class="b-num">Missing</th><th class="b-num">Sick bay</th><th class="b-num">Exeat</th></tr></thead><tbody>
+      ${hostels.map((h) => { const r = latest[h.id]; const c = { present: 0, absent: 0, sickbay: 0, exeat: 0 }; if (r) Object.values(r.records || {}).forEach((v) => { if (c[v] !== undefined) c[v]++; });
+        return `<tr><td data-label="Hostel">${esc(h.name)}</td><td data-label="Session">${r ? esc(SESSIONS.find((s) => s.id === r.session)?.l || r.session) : '<span class="b-tag warn">Not taken</span>'}</td><td data-label="Present" class="b-num">${c.present}</td><td data-label="Missing" class="b-num ${c.absent ? 'b-pos' : ''}">${c.absent}</td><td data-label="Sick bay" class="b-num">${c.sickbay}</td><td data-label="Exeat" class="b-num">${c.exeat}</td></tr>`; }).join('')}</tbody></table>`
+      : '<div class="b-empty">No hostels yet. Add one on the Hostels and beds page.</div>';
+  } catch (e) { showErr($('#cards'), e); $('#roll').innerHTML = ''; }
+});
+</script>
+</body>
+</html>

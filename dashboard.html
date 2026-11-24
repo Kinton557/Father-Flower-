@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Opening your dashboard · Father Flower</title><link rel="icon" href="assets/logo.png"><link rel="stylesheet" href="shared/ui.css"></head>
+<body><p style="font:16px system-ui;padding:24px;color:#13203F">Opening your dashboard…</p>
+<script type="module">
+/* dashboard.html: sends each signed-in person to their own dashboard. Roles: all. */
+import { requireRole, ROLE_HOME } from './shared/auth.js';
+requireRole(Object.keys(ROLE_HOME), p => { location.replace(ROLE_HOME[p.role] || 'login.html'); });
+</script></body></html>

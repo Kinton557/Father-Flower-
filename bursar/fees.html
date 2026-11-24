@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fee structures | Bursar</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="./css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * bursar/fees.html
+ * Purpose: fee structures per campus, form and term (tuition, levies, uniform) plus boarding items.
+ * Role allowed: bursar, admin.
+ * Collections used: feeStructures, campuses, terms, auditLog (via audit()).
+ */
+import { requireRole, audit } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, confirmBox, renderShell, money } from '../shared/ui.js';
+import { navFor, scopeWhere, campusScope, loadCampuses, loadTerms, getSchool, pickCurrentTerm, termLabel, opts, toCents, centsToInput, normForm, FORMS, showErr } from './js/common.js';
+
+requireRole(['bursar', 'admin'], async (profile) => {
+  const main = renderShell({ role: profile.role, title: 'Fee structures', nav: navFor(profile.role) });
+  main.innerHTML = `
+    <div class="b-head"><h1>Fee structures</h1><button class="b-btn" id="newBtn" type="button">New structure</button></div>
+    <section id="editor" class="b-panel" hidden></section>
+    <div class="b-filters">
+      <label>Campus<select id="fCampus"></select></label>
+      <label>Term<select id="fTerm"></select></label>
+    </div>
+    <div id="list"><div class="b-skel"></div></div>`;
+  const $ = (s) => main.querySelector(s);
+  const list = $('#list');
+  const editor = $('#editor');
+  let campuses = [], terms = [], rows = [];
+  try {
+    let school;
+    [campuses, terms, school] = await Promise.all([loadCampuses(profile), loadTerms(), getSchool()]);
+    const cur = pickCurrentTerm(terms, school);
+    const multi = !campusScope(profile);
+    $('#fCampus').innerHTML = (multi ? '<option value="">All campuses</option>' : '') + opts(campuses, (c) => c.id, (c) => c.name, '');
+    $('#fTerm').innerHTML = opts(terms, (t) => t.id, termLabel, cur ? cur.id : '');
+    if (!campuses.length) {
+      list.innerHTML = '<div class="b-empty">No campuses found. Ask the admin to add campuses first.</div>';
+      return;
+    }
+    if (!terms.length) {
+      list.innerHTML = '<div class="b-empty">No terms found. Ask the admin to add a term first.</div>';
+      return;
+    }
+  } catch (e) { showErr(list, e); return; }
+
+  const campusName = (id) => (campuses.find((c) => c.id === id) || {}).name || id;
+  const termById = (id) => terms.find((t) => t.id === id);
+  const sum = (items) => (items || []).reduce((s, i) => s + (i.amountCents || 0), 0);
+
+  async function load() {
+    list.innerHTML = '<div class="b-skel"></div>';
+    try {
+      const cid = $('#fCampus').value;
+      const cons = [fs.where('termId', '==', $('#fTerm').value)];
+      if (cid) cons.push(fs.where('campusId', '==', cid));
+      else cons.push(...scopeWhere(profile));
+      const snap = await fs.getDocs(fs.query(fs.collection(db, 'feeStructures'), ...cons, fs.limit(100)));
+      rows = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => FORMS.indexOf(a.form) - FORMS.indexOf(b.form));
+      render();
+    } catch (e) { showErr(list, e); }
+  }
+
+  function render() {
+    if (!rows.length) { list.innerHTML = '<div class="b-empty">No fee structures for this selection yet. Use New structure.</div>'; return; }
+    list.innerHTML = `<div class="b-grid">${rows.map((r) => `
+      <article class="b-card">
+        <div class="k">${esc(campusName(r.campusId))}</div>
+        <h3 class="b-h2" style="margin:4px 0">${esc(r.form)}</h3>
+        <div class="v">${money(sum(r.items))}</div>
+        <div class="n">${r.boardingItems && r.boardingItems.length ? 'Boarding adds ' + money(sum(r.boardingItems)) : 'No boarding items'}</div>
+        <ul style="padding-left:18px;margin:10px 0">${(r.items || []).map((i) => `<li>${esc(i.name)}: ${money(i.amountCents)}</li>`).join('')}</ul>
+        <div class="b-actions">
+          <button class="b-btn b-ghost" data-edit="${esc(r.id)}" type="button">Edit</button>
+          <button class="b-btn b-ghost" data-copy="${esc(r.id)}" type="button">Copy to term</button>
+          <button class="b-btn b-ghost" data-del="${esc(r.id)}" type="button">Delete</button>
+        </div>
+      </article>`).join('')}</div>`;
+  }
+
+  const rowHTML = (kind, name = '', amt = '') => `<div class="b-row" data-kind="${kind}">
+    <input class="b-in" placeholder="Item name, e.g. Tuition" value="${esc(name)}" aria-label="Item name" maxlength="60">
+    <input class="b-in" inputmode="decimal" placeholder="0.00" value="${esc(amt)}" aria-label="Amount in USD">
+    <button type="button" class="b-btn b-ghost" data-rm>Remove</button></div>`;
+
+  function openEditor(r, mode) {
+    const isEdit = mode === 'edit';
+    const campusOpts = opts(campuses, (c) => c.id, (c) => c.name, r ? r.campusId : (campusScope(profile) || ''));
+    const termOpts = opts(terms, (t) => t.id, termLabel, isEdit && r ? r.termId : '');
+    editor.hidden = false;
+    editor.dataset.edit = isEdit ? r.id : '';
+    editor.innerHTML = `<h2 class="b-h2">${isEdit ? 'Edit structure' : 'New structure'}</h2>
+      <div class="b-form">
+        <label>Campus<select id="eCampus" ${isEdit ? 'disabled' : ''}>${campusOpts}</select></label>
+        <label>Form or grade<select id="eForm" ${isEdit ? 'disabled' : ''}>${FORMS.map((f) => `<option${r && r.form === f ? ' selected' : ''}>${f}</option>`).join('')}</select></label>
+        <label>Term<select id="eTerm" ${isEdit ? 'disabled' : ''}><option value="">Choose term</option>${termOpts}</select></label>
+      </div>
+      <h3 class="b-h2">Fee items (USD)</h3><div id="items">${((r && r.items) || [{}]).map((i) => rowHTML('items', i.name || '', i.amountCents ? centsToInput(i.amountCents) : '')).join('')}</div>
+      <button class="b-btn b-ghost" type="button" data-add="items">Add item</button>
+      <h3 class="b-h2" style="margin-top:16px">Boarding items (added for boarders only)</h3><div id="bitems">${((r && r.boardingItems) || []).map((i) => rowHTML('bitems', i.name || '', centsToInput(i.amountCents))).join('')}</div>
+      <button class="b-btn b-ghost" type="button" data-add="bitems">Add boarding item</button>
+      <div class="b-actions"><button class="b-btn" id="saveBtn" type="button">Save structure</button><button class="b-btn b-ghost" id="cancelBtn" type="button">Cancel</button></div>`;
+    editor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function collect(sel) {
+    const out = [];
+    for (const row of editor.querySelectorAll(`${sel} .b-row`)) {
+      const [n, a] = row.querySelectorAll('input');
+      const name = n.value.trim();
+      const amt = toCents(a.value);
+      if (!name && !a.value.trim()) continue;
+      if (!name) throw new Error('Every fee item needs a name.');
+      if (!(amt > 0)) throw new Error(`Enter an amount above zero for ${name}.`);
+      out.push({ name, amountCents: amt });
+    }
+    return out;
+  }
+
+  editor.addEventListener('click', async (e) => {
+    const t = e.target;
+    if (t.dataset.add) { editor.querySelector('#' + t.dataset.add).insertAdjacentHTML('beforeend', rowHTML(t.dataset.add)); return; }
+    if (t.dataset.rm !== undefined) { t.closest('.b-row').remove(); return; }
+    if (t.id === 'cancelBtn') { editor.hidden = true; return; }
+    if (t.id !== 'saveBtn') return;
+    try {
+      const campusId = editor.querySelector('#eCampus').value;
+      const form = editor.querySelector('#eForm').value;
+      const termId = editor.querySelector('#eTerm').value;
+      if (!campusId || !termId) throw new Error('Choose a campus and a term.');
+      const items = collect('#items');
+      const boardingItems = collect('#bitems');
+      if (!items.length) throw new Error('Add at least one fee item.');
+      const id = `${campusId}_${termId}_${normForm(form)}`;
+      const ref = fs.doc(db, 'feeStructures', id);
+      const isEdit = !!editor.dataset.edit;
+      t.disabled = true;
+      const existing = await fs.getDoc(ref);
+      if (existing.exists() && !isEdit) {
+        t.disabled = false;
+        throw new Error('A structure for this campus, form and term already exists. Edit it instead.');
+      }
+      const data = { campusId, form, termId, items, boardingItems, updatedAt: fs.serverTimestamp() };
+      if (!existing.exists()) { data.createdAt = fs.serverTimestamp(); data.createdBy = profile.uid; }
+      await fs.setDoc(ref, data, { merge: true });
+      await audit(isEdit ? 'feeStructure.update' : 'feeStructure.create', `feeStructures/${id}`, { form, termId, totalCents: sum(items) });
+      toast('Fee structure saved', 'success');
+      editor.hidden = true;
+      load();
+    } catch (err) {
+      toast(err.message || 'Could not save', 'error');
+      const b = editor.querySelector('#saveBtn'); if (b) b.disabled = false;
+    }
+  });
+
+  list.addEventListener('click', async (e) => {
+    const t = e.target;
+    const find = (id) => rows.find((r) => r.id === id);
+    if (t.dataset.edit) openEditor(find(t.dataset.edit), 'edit');
+    if (t.dataset.copy) {
+      const r = find(t.dataset.copy);
+      openEditor(r, 'new');
+      toast('Choose the term to copy this structure into', 'info');
+    }
+    if (t.dataset.del) {
+      const r = find(t.dataset.del);
+      if (!(await confirmBox(`Delete the ${r.form} structure for ${termLabel(termById(r.termId))}? Charges already applied to accounts stay as they are.`))) return;
+      try {
+        await fs.deleteDoc(fs.doc(db, 'feeStructures', r.id));
+        await audit('feeStructure.delete', `feeStructures/${r.id}`, { form: r.form, termId: r.termId });
+        toast('Deleted', 'success');
+        load();
+      } catch (err) { toast('Could not delete: ' + (err.message || ''), 'error'); }
+    }
+  });
+
+  $('#newBtn').addEventListener('click', () => openEditor(null, 'new'));
+  $('#fCampus').addEventListener('change', load);
+  $('#fTerm').addEventListener('change', load);
+  load();
+});
+</script>
+</body>
+</html>

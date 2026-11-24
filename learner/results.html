@@ -1,0 +1,38 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>My results · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* learner/results.html — purpose: learner's marks by subject for a term. Role: learner (own). Collections: learners, terms, assessments, marks, subjects */
+import { requireRole } from '../shared/auth.js';
+import { renderShell, esc } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, list, getMyLearner } from './js/common.js';
+const { where, doc, getDoc } = fs;
+requireRole(['learner'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'learner', title: 'My results', nav: NAV });
+  main.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const l = await getMyLearner(p);
+    if (!l) { main.innerHTML = '<div class="tcard">Your learner record is not linked yet.</div>'; return; }
+    const terms = (await list('terms')).sort((a, b) => b.year - a.year || b.term - a.term);
+    main.innerHTML = `<div class="trow"><label>Term<select id="t">${terms.map(t => `<option value="${esc(t.id)}">Term ${esc(t.term)}, ${esc(t.year)}</option>`).join('')}</select></label></div><div id="r"></div>`;
+    const sn = {}, name = async id => { if (!(id in sn)) { const s = await getDoc(doc(db, 'subjects', id)); sn[id] = s.exists() ? s.data().name : id; } return sn[id]; };
+    async function show() {
+      const tid = main.querySelector('#t').value, box = main.querySelector('#r');
+      if (!tid) { box.innerHTML = '<p class="muted">No terms yet.</p>'; return; }
+      box.innerHTML = '<p class="muted">Loading…</p>';
+      try {
+        const pub = await getDoc(doc(db, 'reports', tid + '_' + l.id)).catch(() => null);
+        if (!pub || !pub.exists() || pub.data().status !== 'published') { box.innerHTML = '<p class="muted">Your results for this term will appear here once the school publishes them.</p>'; return; }
+        const [ms, as] = await Promise.all([list('marks', where('learnerId', '==', l.id), where('termId', '==', tid)), list('assessments', where('classId', '==', l.classId), where('termId', '==', tid))]);
+        const am = {}; as.forEach(a => (am[a.id] = a));
+        const rows = []; for (const m of ms) { const a = am[m.assessmentId]; if (a) rows.push({ s: await name(a.subjectId), a, m }); }
+        rows.sort((x, y) => x.s.localeCompare(y.s) || (x.a.date < y.a.date ? -1 : 1));
+        box.innerHTML = rows.length ? `<table class="tbl"><thead><tr><th>Subject</th><th>Assessment</th><th>Score</th><th>%</th></tr></thead><tbody>${rows.map(r => `<tr><td data-l="Subject">${esc(r.s)}</td><td data-l="Assessment">${esc(r.a.title)}</td><td data-l="Score">${esc(r.m.score)} / ${esc(r.a.outOf)}</td><td data-l="%">${esc(Math.round(r.m.score / r.a.outOf * 1000) / 10)}</td></tr>`).join('')}</tbody></table>
+        <p class="muted">Your full report card appears under "Report card" once the school publishes it.</p>` : '<p class="muted">No marks recorded for this term yet.</p>';
+      } catch (e) { console.error(e); box.innerHTML = '<p class="muted">Could not load results.</p>'; }
+    }
+    main.querySelector('#t').onchange = show; show();
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load. Refresh and try again.</div>'; }
+});
+</script></body></html>

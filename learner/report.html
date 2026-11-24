@@ -1,0 +1,23 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Report card · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* learner/report.html — purpose: view/download the learner's published report card.
+   Role: learner (own); admin/head may preview with ?l=<regNumber>. Collections: reports, learners, terms, classes, campuses, accounts */
+import { requireRole } from '../shared/auth.js';
+import { renderShell } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, getMyLearner } from './js/common.js';
+import { mountReport } from './js/reportView.js';
+requireRole(['learner', 'admin', 'head'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'learner', title: 'Report card', nav: NAV });
+  main.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    let l = null;
+    const id = new URLSearchParams(location.search).get('l');
+    if (p.role !== 'learner' && id) { const s = await fs.getDoc(fs.doc(db, 'learners', id)); if (s.exists()) l = { id: s.id, ...s.data() }; }
+    else if (p.role === 'learner') l = await getMyLearner(p);
+    await mountReport(main, l ? [l] : []);
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load. Refresh and try again.</div>'; }
+});
+</script></body></html>

@@ -1,0 +1,27 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Timetable · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* learner/timetable.html — my class timetable. Role: learner. Collections: learners, timetables/{classId}
+   Assumed shape (Account 2): { days: { Monday: [{time, subject, room}], ... } } or { entries: [{day, time, subject, room}] } */
+import { requireRole } from '../shared/auth.js';
+import { renderShell, esc } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, getMyLearner } from './js/common.js';
+const { doc, getDoc } = fs;
+requireRole(['learner'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'learner', title: 'Timetable', nav: NAV });
+  main.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const l = await getMyLearner(p); if (!l) { main.innerHTML = '<div class="tcard">Your learner record is not linked yet.</div>'; return; }
+    const s = await getDoc(doc(db, 'timetables', l.classId)); if (!s.exists()) { main.innerHTML = '<div class="tcard">Your timetable has not been published yet.</div>'; return; }
+    const t = s.data(), days = {};
+    const subs = {}; try { (await fs.getDocs(fs.query(fs.collection(db, 'subjects'), fs.limit(300)))).forEach(d => { subs[d.id] = d.data().name; }); } catch (e) { /* names are optional */ }
+    const full = { Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday' };
+    (t.slots || []).forEach(e => { const d = full[e.day] || e.day; (days[d] = days[d] || []).push({ time: (e.start || '') + (e.end ? ' – ' + e.end : ''), start: e.start || '', subject: subs[e.subjectId] || e.subject || 'Lesson', room: e.room || '' }); });
+    Object.entries(t.days || {}).forEach(([d, a]) => (a || []).forEach(e => (days[d] = days[d] || []).push({ ...e, start: e.start || e.time || '' })));
+    const order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'], keys = Object.keys(days).sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    if (!keys.length) { main.innerHTML = '<div class="tcard">Your timetable has not been published yet.</div>'; return; }
+    main.innerHTML = keys.map(d => `<div class="tcard" style="margin-bottom:10px"><h3>${esc(d)}</h3>${[...days[d]].sort((a, b) => String(a.start).localeCompare(String(b.start))).map(e => `<p><strong>${esc(e.time)}</strong> · ${esc(e.subject)}${e.room ? ' · ' + esc(e.room) : ''}</p>`).join('')}</div>`).join('');
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load the timetable.</div>'; }
+});
+</script></body></html>

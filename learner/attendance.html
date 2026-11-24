@@ -1,0 +1,20 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Attendance · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* learner/attendance.html — my attendance record. Role: learner. Collections: learners, attendance */
+import { requireRole } from '../shared/auth.js';
+import { renderShell, esc, fmtDate } from '../shared/ui.js';
+import { fs } from '../shared/firebase.js';
+import { NAV, injectStyles, list, getMyLearner } from './js/common.js';
+const { where } = fs;
+requireRole(['learner'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'learner', title: 'Attendance', nav: NAV });
+  main.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const l = await getMyLearner(p); if (!l) { main.innerHTML = '<div class="tcard">Your learner record is not linked yet.</div>'; return; }
+    const rows = (await list('attendance', where('classId', '==', l.classId))).filter(d => (d.records || {})[l.id]).sort((a, b) => (a.date < b.date ? 1 : -1));
+    const pres = rows.filter(r => r.records[l.id] !== 'absent').length;
+    main.innerHTML = `<div class="tcard"><div class="big">${rows.length ? Math.round(pres / rows.length * 100) + '%' : '–'}</div><div class="muted">${pres} present of ${rows.length} registers</div></div><div style="margin-top:10px">${rows.slice(0, 30).map(r => `<div class="tcard" style="margin-bottom:6px;display:flex;justify-content:space-between"><span>${esc(fmtDate(r.date))}</span><span class="pill">${esc(r.records[l.id])}</span></div>`).join('') || '<p class="muted">No registers yet.</p>'}</div>`;
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load attendance.</div>'; }
+});
+</script></body></html>

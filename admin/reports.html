@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reports · Admin</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: report status per learner, bulk approve, publish/unpublish, missing marks per teacher, unlock marks. Role: admin.
+// Collections: reports (write status), terms, classes, learners, allocations, assessments, marks, users (read), auditLog.
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, modal, confirmBox, renderShell, setLoading } from '../shared/ui.js';
+import { ADMIN_NAV } from './js/nav.js';
+const $ = id => document.getElementById(id), col = n => fs.collection(db, n), S = 'min-height:44px;padding:8px';
+A.requireRole(['admin'], async me => {
+  const main = renderShell({ role: 'admin', title: 'Reports', nav: ADMIN_NAV });
+  const get = async n => (await fs.getDocs(fs.query(col(n), fs.limit(300)))).docs.map(d => ({ id: d.id, ...d.data() }));
+  let terms = [], cls = [], reps = [], names = {};
+  try { [terms, cls] = await Promise.all([get('terms'), get('classes')]); } catch (e) { console.error(e); }
+  const cur = (await fs.getDoc(fs.doc(db, 'settings', 'school')).catch(() => null))?.data()?.currentTermId;
+  main.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+    <select id="t" aria-label="Term" style="${S}">${terms.map(t => `<option value="${esc(t.id)}"${t.id === cur ? ' selected' : ''}>${esc(t.year + ' Term ' + t.term)}</option>`).join('')}</select>
+    <select id="k" aria-label="Class" style="${S}">${cls.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select>
+    <button id="go" class="btn btn-primary" style="${S}">Show</button></div><div id="bar" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px"></div><div id="list"></div><h2 style="margin-top:24px">Missing marks by teacher</h2><div id="miss"></div>`;
+  const badge = s => `<span style="padding:2px 10px;border-radius:99px;background:${s === 'published' ? 'var(--ok)' : s === 'approved' ? 'var(--gold)' : 'var(--muted)'};color:#fff">${esc(s)}</span>`;
+  async function show() {
+    const tid = $('t').value, kid = $('k').value; if (!tid || !kid) return toast('Add a term and a class under Academic first.', 'error');
+    setLoading($('list'), true);
+    try {
+      const [rs, ls] = await Promise.all([fs.getDocs(fs.query(col('reports'), fs.where('termId', '==', tid), fs.where('classId', '==', kid), fs.limit(200))), fs.getDocs(fs.query(col('learners'), fs.where('classId', '==', kid), fs.limit(200)))]);
+      names = {}; ls.forEach(d => names[d.id] = d.data().fullName); reps = rs.docs.map(d => ({ id: d.id, ...d.data() }));
+    } catch (e) { console.error(e); $('list').innerHTML = `<p role="alert" style="color:var(--danger)">Could not load reports.</p>`; return; }
+    setLoading($('list'), false);
+    const n = s => reps.filter(r => r.status === s).length;
+    $('bar').innerHTML = `<span>${n('draft')} draft · ${n('approved')} approved · ${n('published')} published</span>` + [['approve', 'Approve all drafts'], ['publish', 'Publish all approved'], ['unpublish', 'Unpublish all'], ['unlock', 'Unlock marks']].map(([a, l]) => `<button class="btn" style="${S}" data-b="${a}">${l}</button>`).join('');
+    $('list').innerHTML = reps.length ? reps.sort((a, b) => (a.positionInClass || 99) - (b.positionInClass || 99)).map(r => `<div class="card" style="padding:12px 16px;margin-bottom:8px;display:flex;justify-content:space-between;gap:8px;align-items:center"><div><strong>${esc(names[r.learnerId] || r.learnerId)}</strong><div style="font-size:.9rem;color:var(--muted)">Average ${esc(r.average ?? '–')} · class position ${esc(r.positionInClass ?? '–')}</div></div>${badge(r.status)}</div>`).join('') : `<p>No reports compiled for this class yet. Teachers compile them from their portal.</p>`;
+    missing(tid, kid);
+  }
+  async function missing(tid, kid) {
+    const m = $('miss'); setLoading(m, true);
+    try {
+      const q = n => fs.getDocs(fs.query(col(n), fs.where('termId', '==', tid), fs.where('classId', '==', kid), fs.limit(1000)));
+      const [al, as, mk] = await Promise.all([q('allocations'), q('assessments'), q('marks')]), nl = Object.keys(names).length, done = {};
+      mk.forEach(d => done[d.data().assessmentId] = (done[d.data().assessmentId] || 0) + 1);
+      const per = {}; al.forEach(a => per[a.id] = { t: a.data().teacherUid, s: a.data().subjectId, miss: 0, n: 0 });
+      as.forEach(d => { const a = d.data(), p = per[a.allocationId]; if (p) { p.n++; p.miss += Math.max(0, nl - (done[d.id] || 0)); } });
+      const us = {}; await Promise.all([...new Set(Object.values(per).map(p => p.t))].map(async u => us[u] = (await fs.getDoc(fs.doc(db, 'users', u))).data()?.fullName || u));
+      const v = Object.values(per); m.innerHTML = v.length ? v.map(p => `<div class="card" style="padding:10px 16px;margin-bottom:6px;display:flex;justify-content:space-between"><span>${esc(us[p.t])} · ${esc(p.s)}</span><strong style="color:${p.miss ? 'var(--danger)' : 'var(--ok)'}">${p.n ? p.miss + ' missing' : 'no assessments'}</strong></div>`).join('') : '<p>No allocations for this class and term.</p>';
+    } catch (e) { console.error(e); m.innerHTML = '<p role="alert" style="color:var(--danger)">Could not check marks.</p>'; }
+    setLoading(m, false);
+  }
+  async function move(from, to, field) {
+    const t = reps.filter(r => r.status === from).slice(0, 400); if (!t.length) return toast(`No ${from} reports.`, 'info');
+    if (!await confirmBox(`Set ${t.length} report(s) to ${to}?`)) return;
+    try {
+      const b = fs.writeBatch(db);
+      t.forEach(r => b.update(fs.doc(db, 'reports', r.id), { status: to, ...(to === 'approved' && from === 'draft' ? { approvedBy: me.uid } : {}), ...(to === 'published' ? { publishedBy: me.uid, publishedAt: fs.serverTimestamp() } : {}), updatedAt: fs.serverTimestamp() }));
+      await b.commit(); await A.audit('reports.' + to, 'terms/' + $('t').value, { classId: $('k').value, count: t.length }); toast('Done', 'success'); show();
+    } catch (e) { console.error(e); toast('Could not update reports.', 'error'); }
+  }
+  main.addEventListener('click', e => {
+    const b = e.target.closest('[data-b]'); if (!b) return; const a = b.dataset.b;
+    if (a === 'approve') move('draft', 'approved'); if (a === 'publish') move('approved', 'published'); if (a === 'unpublish') move('published', 'approved');
+    if (a === 'unlock') modal({ title: 'Unlock marks', bodyHTML: `<label>Reason<textarea id="r" rows="3" style="width:100%;padding:8px"></textarea></label>`, actions: [{ label: 'Unlock', primary: true, onClick: async () => {
+      const why = $('r').value.trim(); if (why.length < 5) { toast('Give a reason of at least 5 characters.', 'error'); return false; }
+      try { await fs.updateDoc(fs.doc(db, 'terms', $('t').value), { marksLocked: false, updatedAt: fs.serverTimestamp() }); await A.audit('marks.unlock', 'terms/' + $('t').value, { reason: why }); toast('Marks unlocked', 'success'); } catch (x) { console.error(x); toast('Could not unlock.', 'error'); return false; } } }, { label: 'Cancel' }] });
+  });
+  $('go').onclick = show; if (cur) show();
+});
+</script></body></html>

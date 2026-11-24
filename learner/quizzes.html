@@ -1,0 +1,25 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Quizzes · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* learner/quizzes.html — list of quizzes for my class with status and attempts. Role: learner. Collections: learners, quizzes, quizAttempts */
+import { requireRole } from '../shared/auth.js';
+import { renderShell, esc, fmtDate } from '../shared/ui.js';
+import { fs } from '../shared/firebase.js';
+import { NAV, injectStyles, list, getMyLearner, toMs } from './js/common.js';
+const { where } = fs;
+requireRole(['learner'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'learner', title: 'Quizzes', nav: NAV });
+  main.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const l = await getMyLearner(p); if (!l) { main.innerHTML = '<div class="tcard">Your learner record is not linked yet.</div>'; return; }
+    const [qz, at] = await Promise.all([list('quizzes', where('classId', '==', l.classId)), list('quizAttempts', where('learnerId', '==', l.id))]);
+    const now = Date.now();
+    main.innerHTML = qz.filter(q => q.status !== 'draft').sort((a, b) => (toMs(b.opensAt) || 0) - (toMs(a.opensAt) || 0)).map(q => {
+      const mine = at.filter(a => a.quizId === q.id), o = toMs(q.opensAt), c = toMs(q.closesAt);
+      const st = q.status === 'closed' || (c && c < now) ? 'Closed' : o && o > now ? 'Opens ' + fmtDate(q.opensAt) : 'Open';
+      const can = st === 'Open' && (mine.some(a => a.status === 'in_progress') || mine.length < q.attemptsAllowed);
+      return `<div class="tcard" style="margin-bottom:8px"><strong>${esc(q.title)}</strong> <span class="pill">${esc(st)}</span><div class="muted">${q.timeLimitMin ? esc(q.timeLimitMin) + ' min · ' : ''}${mine.length}/${esc(q.attemptsAllowed)} attempts</div><p><a class="tbtn ${can ? '' : 'alt'}" href="quiz.html?id=${encodeURIComponent(q.id)}">${can ? (mine.some(a => a.status === 'in_progress') ? 'Continue' : 'Start') : 'View'}</a></p></div>`;
+    }).join('') || '<p class="muted">No quizzes yet.</p>';
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load quizzes.</div>'; }
+});
+</script></body></html>

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Academic · Admin</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: manage terms, campuses, classes, subjects, allocations and grading scales. Role: admin.
+// Collections: terms, campuses, classes, subjects, allocations, users (teachers, read), settings/school, settings/grading.
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, modal, confirmBox, renderShell, setLoading } from '../shared/ui.js';
+import { ADMIN_NAV } from './js/nav.js';
+const $ = id => document.getElementById(id), col = n => fs.collection(db, n);
+const LV = ['primary','secondary'];
+const ENT = {
+  terms: { t: 'Terms', f: [['year','Year','number'],['term','Term (1 to 3)','number'],['startDate','Start date','date'],['endDate','End date','date'],['open','Open','bool'],['marksLocked','Marks locked','bool']] },
+  campuses: { t: 'Campuses', f: [['name','Name','text'],['level','Level','select',['primary','secondary','both']],['town','Town','text'],['headName','Head','text'],['phone','Phone','text'],['email','Email','text'],['boarding','Boarding','bool'],['active','Active','bool']] },
+  classes: { t: 'Classes', f: [['name','Name','text'],['campusId','Campus','ref','campuses'],['form','Form / Grade','number'],['level','Level','select',LV],['year','Year','number'],['classTeacherUid','Class teacher','ref','teachers']] },
+  subjects: { t: 'Subjects', f: [['name','Name','text'],['code','Code','text'],['level','Level','select',['primary','secondary','both']],['campusIds','Campuses (none = all)','multi','campuses']] },
+  allocations: { t: 'Allocations', f: [['teacherUid','Teacher','ref','teachers'],['classId','Class','ref','classes'],['subjectId','Subject','ref','subjects'],['termId','Term','ref','terms']] }
+};
+const LABEL = { terms: r => `${r.year} Term ${r.term}`, campuses: r => r.name, classes: r => r.name, subjects: r => r.name, teachers: r => r.fullName };
+const SRC = { teachers: () => fs.query(col('users'), fs.where('role', '==', 'teacher'), fs.limit(300)) };
+A.requireRole(['admin'], async me => {
+  const main = renderShell({ role: 'admin', title: 'Academic', nav: ADMIN_NAV });
+  let tab = 'terms', ref = {}, current = '';
+  const load = async k => { const s = await fs.getDocs(SRC[k] ? SRC[k]() : fs.query(col(k), fs.limit(300))); ref[k] = s.docs.map(d => ({ id: d.id, ...d.data() })); };
+  const name = (k, id) => { const r = (ref[k] || []).find(x => x.id === id); return r ? LABEL[k](r) : (id || ''); };
+  const show = (e, r) => ENT[e].f.map(([k, , t, s]) => t === 'ref' ? name(s, r[k]) : t === 'multi' ? (r[k] || []).map(i => name(s, i)).join('/') : t === 'bool' ? (r[k] ? k : '') : r[k]).filter(Boolean).join(' · ');
+  main.innerHTML = `<div id="tabs" style="display:flex;gap:6px;overflow-x:auto;margin-bottom:12px"></div><div id="body"></div>`;
+  const tabs = [...Object.keys(ENT), 'grading'];
+  const drawTabs = () => { $('tabs').innerHTML = tabs.map(k => `<button class="btn${k === tab ? ' btn-primary' : ''}" style="min-height:44px;white-space:nowrap" data-t="${k}">${esc(ENT[k]?.t || 'Grading')}</button>`).join(''); };
+  async function draw() {
+    drawTabs(); const body = $('body'); setLoading(body, true);
+    try {
+      if (tab === 'grading') return grading(body);
+      for (const k of ['terms','campuses','classes','subjects','teachers']) if (!ref[k]) await load(k);
+      const rows = tab === 'allocations' ? (await fs.getDocs(fs.query(col('allocations'), fs.limit(200)))).docs.map(d => ({ id: d.id, ...d.data() })) : (await load(tab), ref[tab]);
+      current = (await fs.getDoc(fs.doc(db, 'settings', 'school'))).data()?.currentTermId || '';
+      body.innerHTML = `<button id="new" class="btn btn-primary" style="min-height:44px;margin-bottom:12px">Add</button>` + (rows.length ? rows.map(r => `<div class="card" style="padding:12px 16px;margin-bottom:8px"><div>${esc(show(tab, r))}${tab === 'terms' && r.id === current ? ' <strong>(current)</strong>' : ''}</div><div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="btn" style="min-height:44px" data-a="edit" data-id="${esc(r.id)}">Edit</button>${tab === 'terms' ? `<button class="btn" style="min-height:44px" data-a="cur" data-id="${esc(r.id)}">Make current</button>` : ''}<button class="btn" style="min-height:44px" data-a="del" data-id="${esc(r.id)}">Delete</button></div></div>`).join('') : `<p>Nothing here yet. Use “Add” to create the first one.</p>`);
+      body.rows = rows; $('new').onclick = () => form();
+    } catch (x) { console.error(x); body.innerHTML = `<p role="alert" style="color:var(--danger)">Could not load. Refresh and try again.</p>`; }
+    setLoading(body, false);
+  }
+  function form(r = {}) {
+    const e = ENT[tab], edit = !!r.id;
+    const html = e.f.map(([k, l, t, s]) => {
+      const st = 'display:block;width:100%;min-height:44px;padding:8px;border:1px solid var(--line);border-radius:10px', v = r[k];
+      const inner = t === 'bool' ? `<input id="f-${k}" type="checkbox"${v ? ' checked' : ''}>` : t === 'select' ? `<select id="f-${k}" style="${st}">${s.map(o => `<option${o === v ? ' selected' : ''}>${o}</option>`).join('')}</select>` :
+        t === 'ref' || t === 'multi' ? `<select id="f-${k}" ${t === 'multi' ? 'multiple' : ''} style="${st}">${t === 'ref' ? '<option value="">Choose…</option>' : ''}${(ref[s] || []).map(o => `<option value="${esc(o.id)}"${(t === 'multi' ? (v || []).includes(o.id) : o.id === v) ? ' selected' : ''}>${esc(LABEL[s](o))}</option>`).join('')}</select>` :
+        `<input id="f-${k}" type="${t}" value="${esc(v ?? '')}" style="${st}">`;
+      return `<label style="display:block;margin-bottom:10px">${esc(l)}${inner}</label>`;
+    }).join('');
+    modal({ title: (edit ? 'Edit ' : 'Add ') + e.t.toLowerCase(), bodyHTML: html, actions: [{ label: 'Save', primary: true, onClick: async () => {
+      const d = {};
+      for (const [k, l, t] of e.f) { const el = $('f-' + k); d[k] = t === 'bool' ? el.checked : t === 'number' ? Number(el.value) : t === 'multi' ? [...el.selectedOptions].map(o => o.value) : el.value.trim(); }
+      const bad = e.f.find(([k, , t]) => t !== 'bool' && t !== 'multi' && (d[k] === '' || (t === 'number' && !(d[k] > 0))) && !(tab === 'classes' && k === 'classTeacherUid') && !(['phone','email','headName','town'].includes(k)));
+      if (bad) { toast(`Check “${bad[1]}”.`, 'error'); return false; }
+      if (tab === 'terms' && (d.term < 1 || d.term > 3 || d.endDate < d.startDate)) { toast('Term must be 1 to 3 and end after it starts.', 'error'); return false; }
+      try {
+        if (edit) { await fs.updateDoc(fs.doc(db, tab, r.id), { ...d, updatedAt: fs.serverTimestamp() }); if (tab === 'terms' && d.marksLocked !== r.marksLocked) await A.audit(d.marksLocked ? 'marks.lock' : 'marks.unlock', 'terms/' + r.id, {}); }
+        else await fs.addDoc(col(tab), { ...d, createdAt: fs.serverTimestamp(), createdBy: me.uid, updatedAt: fs.serverTimestamp() });
+        await A.audit((edit ? 'update.' : 'create.') + tab, tab + '/' + (r.id || ''), {}); toast('Saved', 'success'); delete ref[tab]; draw();
+      } catch (x) { console.error(x); toast('Could not save. Try again.', 'error'); return false; }
+    } }, { label: 'Cancel' }] });
+  }
+  async function grading(body) {
+    const g = ((await fs.getDoc(fs.doc(db, 'settings', 'grading'))).data()?.scales) || [];
+    body.innerHTML = `<p>One grade per line as <code>minimum mark, grade, comment</code>, highest first.</p><textarea id="g" rows="8" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:10px" aria-label="Grading scale">${esc(g.map(s => `${s.min},${s.grade},${s.comment}`).join('\n'))}</textarea><button id="sg" class="btn btn-primary" style="min-height:44px;margin-top:8px">Save grading scale</button>`;
+    $('sg').onclick = async () => {
+      const sc = $('g').value.split('\n').map(l => l.trim()).filter(Boolean).map(l => { const [m, gr, ...c] = l.split(','); return { min: Number(m), grade: (gr || '').trim(), comment: c.join(',').trim() }; });
+      if (!sc.length || sc.some(s => isNaN(s.min) || s.min < 0 || s.min > 100 || !s.grade)) return toast('Each line needs a mark from 0 to 100 and a grade.', 'error');
+      sc.sort((a, b) => b.min - a.min);
+      try { await fs.setDoc(fs.doc(db, 'settings', 'grading'), { scales: sc, updatedAt: fs.serverTimestamp() }, { merge: true }); await A.audit('grading.update', 'settings/grading', { grades: sc.length }); toast('Saved', 'success'); } catch (x) { console.error(x); toast('Could not save.', 'error'); }
+    };
+  }
+  main.addEventListener('click', async e => {
+    const t = e.target.closest('[data-t]'); if (t) { tab = t.dataset.t; return draw(); }
+    const b = e.target.closest('[data-a]'); if (!b) return;
+    const r = $('body').rows.find(x => x.id === b.dataset.id);
+    if (b.dataset.a === 'edit') form(r);
+    if (b.dataset.a === 'cur') { await fs.setDoc(fs.doc(db, 'settings', 'school'), { currentTermId: r.id, updatedAt: fs.serverTimestamp() }, { merge: true }); await A.audit('term.setCurrent', 'terms/' + r.id, {}); toast('Current term set', 'success'); draw(); }
+    if (b.dataset.a === 'del' && await confirmBox('Delete this record? This cannot be undone.')) { try { await fs.deleteDoc(fs.doc(db, tab, r.id)); await A.audit('delete.' + tab, tab + '/' + r.id, {}); toast('Deleted', 'success'); delete ref[tab]; draw(); } catch (x) { console.error(x); toast('Could not delete.', 'error'); } }
+  });
+  draw();
+});
+</script></body></html>

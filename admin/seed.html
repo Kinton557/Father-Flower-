@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Seed data · Admin</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: one-time starter data (school settings, campuses, grading, subjects). Safe to run twice: existing docs are never overwritten.
+// Role: admin. Collections: settings, campuses, subjects. Campus list is unconfirmed: edit it in Academic afterwards.
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { toast, renderShell, setLoading, esc } from '../shared/ui.js';
+import { ADMIN_NAV } from './js/nav.js';
+const SCHOOL = { name: 'Father Flower Educational Network', shortName: 'Father Flower', tagline: 'The Leading Light', motto: 'Moulding a disciplined learner for national and global impact through military leadership styles.', vision: 'To be the leading provider of world-class basic education by 2030.', values: ['Teamwork','Integrity','Commitment','Dedication','Transparency'], address: 'Stand No. 6 & 7 Mashayamombe Road, Kadoma, Mashonaland West', phones: ['+263 773 526 109','+263 771 448 240'], email: 'info@ffgs.co.zw', officeHours: 'Mon–Fri 07:30–16:00', headName: 'Dr Jimmy Lemekani-Waya', holdReportsIfOwing: false, socials: {} };
+const GRADES = [[80,'A','Excellent'],[70,'B','Very good'],[60,'C','Good'],[50,'D','Satisfactory'],[40,'E','Needs improvement'],[0,'U','Ungraded']].map(([min, grade, comment]) => ({ min, grade, comment }));
+const CAMPUSES = [['city-institute','City Institute','both'],['waverly','Waverly','both'],['ingezi','Ingezi','both'],['rimuka','Rimuka','both'],['pixie-combie','Pixie Combie','primary'],['ngezi-institute','Ngezi Institute','primary'],['ngezi-high','Ngezi High','secondary']];
+const SUBJECTS = [['english','English','ENG','both'],['maths','Mathematics','MAT','both'],['shona','Shona','SHO','both'],['science','Science','SCI','both'],['history','History','HIS','secondary'],['geography','Geography','GEO','secondary'],['commerce','Commerce','COM','secondary'],['ict','Computer Science','ICT','both'],['pe','Physical Education','PED','both']];
+A.requireRole(['admin'], me => {
+  const main = renderShell({ role: 'admin', title: 'Seed data', nav: ADMIN_NAV });
+  main.innerHTML = `<p>Creates starter school settings, campuses, a grading scale and subjects. Anything that already exists is left alone, so you can run it again safely. Check every detail with the school afterwards.</p><button id="go" class="btn btn-primary" style="min-height:44px">Create starter data</button><ul id="log"></ul>`;
+  const log = m => main.querySelector('#log').insertAdjacentHTML('beforeend', `<li>${esc(m)}</li>`);
+  main.querySelector('#go').onclick = async e => {
+    setLoading(e.target, true);
+    const meta = () => ({ createdAt: fs.serverTimestamp(), createdBy: me.uid, updatedAt: fs.serverTimestamp() });
+    const add = async (path, data) => { const r = fs.doc(db, ...path); if ((await fs.getDoc(r)).exists()) return log('Kept existing ' + path.join('/')); await fs.setDoc(r, { ...data, ...meta() }); log('Created ' + path.join('/')); };
+    try {
+      await add(['settings', 'school'], SCHOOL);
+      await add(['settings', 'grading'], { scales: GRADES });
+      for (const [id, name, level] of CAMPUSES) await add(['campuses', id], { name, level, town: 'Kadoma', headName: '', phone: '', email: '', boarding: false, active: true });
+      for (const [id, name, code, level] of SUBJECTS) await add(['subjects', id], { name, code, level, campusIds: [] });
+      await A.audit('seed.run', 'settings/school', {}); toast('Starter data ready', 'success');
+    } catch (x) { console.error(x); toast('Seeding stopped. Check your connection and run it again.', 'error'); }
+    setLoading(e.target, false);
+  };
+});
+</script></body></html>

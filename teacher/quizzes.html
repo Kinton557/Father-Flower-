@@ -1,0 +1,83 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Quizzes · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* teacher/quizzes.html — quiz builder, publish/close, results, manual marking, copy scores to term marks.
+   Role: teacher (own allocations), admin. Collections: quizzes, quizzes/{id}/questions, quizAttempts, learners, assessments, marks */
+import { requireRole, audit } from '../shared/auth.js';
+import { renderShell, esc, toast, confirmBox, setLoading } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, list, loadContext, gradeAnswer, copyToTerm } from './js/common.js';
+const { collection, doc, getDocs, writeBatch, updateDoc, serverTimestamp, where } = fs;
+const qBlock = () => `<div class="tcard q" style="margin:8px 0"><div class="trow"><label>Type<select class="qty"><option value="mcq">Multiple choice</option><option value="truefalse">True / false</option><option value="short">Short answer (auto)</option><option value="long">Long answer (manual)</option></select></label><label>Marks<input class="qm" type="number" min="0.5" step="any" value="1"></label></div>
+<label>Question<textarea class="qt tin" rows="2" style="width:100%"></textarea></label><label>Options (MCQ, one per line)<textarea class="qo tin" rows="3" style="width:100%"></textarea></label>
+<label>Correct answer (MCQ: exact option; true/false: true or false; short: accepted answers separated by |)<input class="qa tin" style="width:100%"></label><button type="button" class="tbtn danger rm">Remove</button></div>`;
+requireRole(['teacher', 'admin'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'teacher', title: 'Quizzes', nav: NAV });
+  try {
+    const ctx = await loadContext(p);
+    if (!ctx.term) { main.innerHTML = '<div class="tcard">No current term set.</div>'; return; }
+    main.innerHTML = `<div class="trow"><label>Class &amp; subject<select id="al"></select></label></div>
+    <form id="f" class="tcard" novalidate><h3>New quiz</h3><div class="trow"><label>Title<input id="t" maxlength="80"></label><label>Time limit (min, 0 = none)<input id="tl" type="number" min="0" value="20"></label><label>Opens<input id="op" type="datetime-local"></label><label>Closes<input id="cl" type="datetime-local"></label><label>Attempts<input id="at" type="number" min="1" value="1"></label>
+    <label>Show answers<select id="sa"><option value="afterClose">After it closes</option><option value="immediate">Immediately</option><option value="never">Never</option></select></label></div>
+    <label><input type="checkbox" id="sh"> Shuffle questions</label> &nbsp; <label><input type="checkbox" id="ct"> Counts towards term mark</label>
+    <label style="display:block">Instructions<textarea id="in" class="tin" rows="2" style="width:100%"></textarea></label><div id="qs"></div>
+    <button type="button" class="tbtn alt" id="aq">+ Add question</button> <button class="tbtn" id="go">Save as draft</button></form><h2>Quizzes</h2><div id="ls"></div><div id="rs"></div>`;
+    const $ = id => main.querySelector('#' + id), cur = () => ctx.allocations.find(a => a.id === $('al').value);
+    $('al').innerHTML = ctx.allocations.map(a => `<option value="${esc(a.id)}">${esc(ctx.label(a))}</option>`).join('') || '<option value="">No allocations</option>';
+    $('qs').innerHTML = qBlock(); $('aq').onclick = () => $('qs').insertAdjacentHTML('beforeend', qBlock());
+    $('qs').onclick = e => { if (e.target.classList.contains('rm')) e.target.closest('.q').remove(); };
+    async function show() {
+      const a = cur(); $('rs').innerHTML = ''; if (!a) { $('ls').innerHTML = '<p class="muted">No allocation.</p>'; return; }
+      try {
+        const qz = await list('quizzes', where('classId', '==', a.classId), where('subjectId', '==', a.subjectId), where('termId', '==', ctx.term.id));
+        $('ls').innerHTML = qz.map(q => `<div class="tcard" style="margin-bottom:8px"><strong>${esc(q.title)}</strong> <span class="pill">${esc(q.status)}</span> <span class="muted">/${esc(q.outOf)}</span><div class="trow">
+          ${q.status !== 'published' ? `<button class="tbtn alt" data-s="published" data-id="${esc(q.id)}">Publish</button>` : ''}${q.status === 'published' ? `<button class="tbtn alt" data-s="closed" data-id="${esc(q.id)}">Close</button>` : ''}<button class="tbtn" data-r="${esc(q.id)}">Results</button></div></div>`).join('') || '<p class="muted">No quizzes yet.</p>';
+        $('ls').onclick = async e => {
+          const d = e.target.dataset, q = qz.find(x => x.id === (d.id || d.r)); if (!q) return;
+          if (d.s) { try { await updateDoc(doc(db, 'quizzes', q.id), { status: d.s, updatedAt: serverTimestamp() }); await audit(d.s === 'published' ? 'publish_quiz' : 'close_quiz', 'quizzes/' + q.id, {}); toast('Updated', 'success'); show(); } catch (err) { console.error(err); toast('Could not update.', 'error'); } }
+          else results(q, a);
+        };
+      } catch (e) { console.error(e); $('ls').innerHTML = '<p class="muted">Could not load quizzes.</p>'; }
+    }
+    async function results(q, a) {
+      const box = $('rs'); box.innerHTML = '<p class="muted">Loading results…</p>';
+      try {
+        const [at, ls, qsnap] = await Promise.all([list('quizAttempts', where('quizId', '==', q.id)), list('learners', where('classId', '==', q.classId)), getDocs(collection(db, 'quizzes', q.id, 'questions'))]);
+        const qs = qsnap.docs.map(d => ({ id: d.id, ...d.data() })).sort((x, y) => x.order - y.order), nm = {}; ls.forEach(l => (nm[l.id] = l.fullName));
+        const done = at.filter(x => x.status !== 'in_progress'), hasLong = qs.some(x => x.type === 'long');
+        const missed = qs.filter(x => x.type !== 'long').map(x => ({ x, ok: done.filter(t => gradeAnswer(x, (t.answers || {})[x.id]) > 0).length })).sort((m, n) => m.ok - n.ok).slice(0, 3);
+        box.innerHTML = `<div class="tcard"><h3>Results: ${esc(q.title)}</h3><table class="tbl"><thead><tr><th>Learner</th><th>Auto</th><th>${hasLong ? 'Manual' : ''}</th><th>Total / ${esc(q.outOf)}</th><th></th></tr></thead><tbody>${done.map(t => `<tr><td data-l="Learner">${esc(nm[t.learnerId] || t.learnerId)}</td><td data-l="Auto">${esc(t.autoScore ?? 0)}</td><td data-l="Manual">${hasLong ? `<input class="tin mn" type="number" min="0" step="any" style="width:80px" value="${esc(t.manualScore ?? 0)}">` : ''}</td><td data-l="Total">${esc(t.totalScore ?? 0)}</td><td>${hasLong ? `<button class="tbtn alt sv" data-id="${esc(t.id)}" data-a="${esc(t.autoScore ?? 0)}">Save</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="5">No submissions yet.</td></tr>'}</tbody></table>
+        <h4>Most-missed questions</h4>${missed.map(m => `<p>${esc(m.x.text)} <span class="muted">(${m.ok}/${done.length} correct)</span></p>`).join('') || '<p class="muted">No data yet.</p>'}
+        ${q.countsTowardsTerm ? '<button class="tbtn" id="cp">Copy scores to term marks</button>' : ''}</div>`;
+        box.onclick = async e => {
+          if (e.target.classList.contains('sv')) { const m = Number(e.target.closest('tr').querySelector('.mn').value); if (!(m >= 0)) return toast('Invalid mark.', 'error'); const au = Number(e.target.dataset.a); try { await updateDoc(doc(db, 'quizAttempts', e.target.dataset.id), { manualScore: m, totalScore: au + m, status: 'marked', updatedAt: serverTimestamp() }); toast('Saved', 'success'); results(q, a); } catch (err) { console.error(err); toast('Could not save.', 'error'); } }
+          if (e.target.id === 'cp') {
+            if (ctx.term.marksLocked) return toast('Marks are locked.', 'error'); if (!(await confirmBox('Copy the best score of each learner into term marks?'))) return;
+            const sc = {}; done.forEach(t => { sc[t.learnerId] = Math.max(sc[t.learnerId] ?? 0, t.totalScore ?? 0); });
+            try { const id = await copyToTerm({ classId: q.classId, subjectId: q.subjectId, termId: q.termId, allocationId: a.id, title: q.title, type: 'quiz', outOf: q.outOf, source: 'quiz', scores: sc, uid: p.uid }); await audit('quiz_to_marks', 'assessments/' + id, { quizId: q.id }); toast('Copied to term marks', 'success'); } catch (err) { console.error(err); toast('Copy failed.', 'error'); }
+          }
+        };
+      } catch (e) { console.error(e); box.innerHTML = '<p class="muted">Could not load results.</p>'; }
+    }
+    $('f').onsubmit = async e => {
+      e.preventDefault(); const a = cur(); if (!a) return toast('Choose a class and subject.', 'error');
+      const t = $('t').value.trim(); if (!t) return toast('Enter a title.', 'error');
+      const qs = [...main.querySelectorAll('.q')].map(b => { const g = c => b.querySelector(c).value.trim(), type = g('.qty'); return { type, text: g('.qt'), options: type === 'mcq' ? g('.qo').split('\n').map(s => s.trim()).filter(Boolean) : [], answer: type === 'truefalse' ? g('.qa').toLowerCase() : g('.qa'), marks: Number(g('.qm')) }; });
+      if (!qs.length) return toast('Add at least one question.', 'error');
+      const bad = qs.findIndex(q => !q.text || !(q.marks > 0) || (q.type === 'mcq' && (q.options.length < 2 || !q.options.includes(q.answer))) || (q.type === 'truefalse' && !['true', 'false'].includes(q.answer)) || (q.type === 'short' && !q.answer));
+      if (bad >= 0) return toast(`Check question ${bad + 1}.`, 'error');
+      const o = $('op').value, c = $('cl').value; if (o && c && c <= o) return toast('Closing time must be after opening time.', 'error');
+      setLoading($('go'), true);
+      try {
+        const ts = serverTimestamp(), ref = doc(collection(db, 'quizzes')), b = writeBatch(db);
+        b.set(ref, { classId: a.classId, subjectId: a.subjectId, termId: ctx.term.id, title: t, instructions: $('in').value.trim(), timeLimitMin: Number($('tl').value) || 0, opensAt: o ? new Date(o).toISOString() : null, closesAt: c ? new Date(c).toISOString() : null, attemptsAllowed: Math.max(1, Number($('at').value) || 1), shuffle: $('sh').checked, countsTowardsTerm: $('ct').checked, outOf: qs.reduce((s, q) => s + q.marks, 0), status: 'draft', showAnswersAfter: $('sa').value, createdAt: ts, createdBy: p.uid, updatedAt: ts });
+        qs.forEach((q, i) => b.set(doc(collection(db, 'quizzes', ref.id, 'questions')), { ...q, order: i, createdAt: ts, createdBy: p.uid, updatedAt: ts }));
+        await b.commit(); await audit('create_quiz', 'quizzes/' + ref.id, { title: t });
+        toast('Quiz saved as draft. Publish it from the list.', 'success'); $('t').value = ''; $('qs').innerHTML = qBlock(); show();
+      } catch (err) { console.error(err); toast('Could not save the quiz.', 'error'); }
+      setLoading($('go'), false);
+    };
+    $('al').onchange = show; show();
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load. Refresh and try again.</div>'; }
+});
+</script></body></html>

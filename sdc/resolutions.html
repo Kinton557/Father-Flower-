@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SDC resolutions | Father Flower</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * sdc/resolutions.html
+ * Purpose: register of SDC resolutions and whether they have been carried out.
+ * Role allowed: sdc, admin.
+ * Collections used: sdcResolutions.
+ */
+import { esc } from '../shared/ui.js';
+import { crudPage } from '../bursar/js/crud.js';
+import { SDC_NAV } from '../bursar/js/common.js';
+
+const ST = { pending: 'warn', passed: 'ok', implemented: 'ok', rejected: 'bad' };
+
+crudPage({
+  roles: ['sdc', 'admin'],
+  nav: SDC_NAV,
+  title: 'Resolutions',
+  collection: 'sdcResolutions',
+  newLabel: 'Record resolution',
+  empty: 'No resolutions recorded yet.',
+  auditSave: true,
+  sort: (a, b) => (b.date || '').localeCompare(a.date || '') || (b.number || '').localeCompare(a.number || ''),
+  fields: [
+    { key: 'number', label: 'Resolution number (e.g. 2026/04)', type: 'text', required: true, max: 20 },
+    { key: 'date', label: 'Date passed', type: 'date', required: true, today: true },
+    { key: 'title', label: 'Title', type: 'text', required: true, max: 140, wide: true },
+    { key: 'text', label: 'Resolution', type: 'textarea', required: true, wide: true },
+    { key: 'proposer', label: 'Proposed by', type: 'text', max: 100 },
+    { key: 'seconder', label: 'Seconded by', type: 'text', max: 100 },
+    { key: 'status', label: 'Status', type: 'select', required: true, default: 'passed', options: [{ v: 'pending', l: 'Pending' }, { v: 'passed', l: 'Passed' }, { v: 'implemented', l: 'Implemented' }, { v: 'rejected', l: 'Rejected' }] }
+  ],
+  columns: [
+    { label: 'No', key: 'number' }, { label: 'Date', key: 'date', type: 'date' },
+    { label: 'Resolution', html: (r) => `<strong>${esc(r.title)}</strong><br><small>${esc(r.text || '')}</small>` },
+    { label: 'Status', html: (r) => `<span class="b-tag ${ST[r.status] || ''}">${esc(r.status)}</span>` }
+  ]
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Notices · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* learner/notices.html — purpose: notices for learners. Role: learner. Collections: learners, notices */
+import { requireRole } from '../shared/auth.js';
+import { renderShell, esc, fmtDate } from '../shared/ui.js';
+import { NAV, injectStyles, getMyLearner, noticesFor } from './js/common.js';
+requireRole(['learner'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'learner', title: 'Notices', nav: NAV });
+  main.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const l = await getMyLearner(p), n = (await noticesFor('learner', l ? l.campusId : '')).slice(0, 50);
+    main.innerHTML = n.map(x => `<div class="tcard" style="margin-bottom:8px">${x.pinned ? '<span class="pill">Pinned</span> ' : ''}<strong>${esc(x.title)}</strong> <span class="muted">${x.publishAt ? esc(fmtDate(x.publishAt)) : ''}</span><p>${esc(x.body)}</p></div>`).join('') || '<p class="muted">No notices right now.</p>';
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load notices.</div>'; }
+});
+</script></body></html>

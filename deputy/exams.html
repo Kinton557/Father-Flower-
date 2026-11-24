@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Exams · Deputy · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: exam timetable, venues, seating plan, papers received, invigilation roster. Role: deputy (admin allowed).
+// Collections: examTimetables, invigilation (write), classes, subjects, users (teachers). Field names are assumptions (see Requests).
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell, setLoading } from '../shared/ui.js';
+import { crud, loadRef } from '../admin/js/crud.js';
+import { DEPUTY_NAV } from './js/nav.js';
+A.requireRole(['deputy', 'admin'], async me => {
+  const main = renderShell({ role: 'deputy', title: 'Exams', nav: DEPUTY_NAV }); const cw = me.campusId === 'all' ? [] : [fs.where('campusId', '==', me.campusId)];
+  const [classes, subjects, teachers] = await Promise.all([loadRef('classes', c => c.name, ...cw), loadRef('subjects', s => s.name), loadRef('users', u => u.fullName, fs.where('role', '==', 'teacher'), ...cw)]).catch(e => { console.error(e); toast('Could not load lists.', 'error'); return [[], [], []]; });
+  crud({ main, title: 'Exam timetable', coll: 'examTimetables', me, defaults: { campusId: me.campusId }, refs: { classId: classes, subjectId: subjects },
+    fields: [['date', 'Date', 'date'], ['startTime', 'Start time', 'time'], ['classId', 'Class', 'ref'], ['subjectId', 'Subject', 'ref'], ['venue', 'Venue', 'text'], ['seatingPlan', 'Seating plan', 'textarea', null, 'optional'], ['papersReceived', 'Papers received', 'bool']] });
+  crud({ main, title: 'Invigilation roster', coll: 'invigilation', me, defaults: { campusId: me.campusId }, refs: { teacherUid: teachers },
+    fields: [['date', 'Date', 'date'], ['venue', 'Venue', 'text'], ['teacherUid', 'Invigilator', 'ref'], ['session', 'Session', 'select', ['morning', 'afternoon']]] });
+});
+</script></body></html>

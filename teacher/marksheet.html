@@ -1,0 +1,53 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mark sheet · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* teacher/marksheet.html — purpose: class mark sheet (scores, total, grade, average), CSV export and print.
+   Role: teacher (own allocations), admin. Collections: allocations, assessments, learners, marks, settings/grading */
+import { requireRole } from '../shared/auth.js';
+import { renderShell, esc, toast, getSettings, printElement } from '../shared/ui.js';
+import { fs } from '../shared/firebase.js';
+import { NAV, injectStyles, list, loadContext } from './js/common.js';
+import { subjectResult, gradeFor } from './js/reportEngine.js';
+const { where } = fs;
+requireRole(['teacher', 'admin'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'teacher', title: 'Mark sheet', nav: NAV });
+  try {
+    const ctx = await loadContext(p);
+    const st = await getSettings(); const scales = ((st.grading || st).scales) || [];
+    main.innerHTML = `<div class="trow"><label>Class &amp; subject<select id="al"></select></label><button class="tbtn alt" id="csv">Export CSV</button><button class="tbtn alt" id="pr">Print</button></div><div id="sh" style="overflow-x:auto"><p class="muted">Loading…</p></div>`;
+    const $ = id => main.querySelector('#' + id);
+    $('al').innerHTML = ctx.allocations.map(a => `<option value="${esc(a.id)}">${esc(ctx.label(a))}</option>`).join('') || '<option value="">No allocations</option>';
+    const pre = new URLSearchParams(location.search).get('al'); if (pre) $('al').value = pre;
+    let table = [];
+    async function show() {
+      const a = ctx.allocations.find(x => x.id === $('al').value);
+      if (!a) { $('sh').innerHTML = '<p class="muted">No allocations this term.</p>'; return; }
+      $('sh').innerHTML = '<p class="muted">Loading…</p>';
+      try {
+        const [asms0, ls, ms] = await Promise.all([list('assessments', where('allocationId', '==', a.id)), list('learners', where('classId', '==', a.classId), where('status', '==', 'active')), list('marks', where('classId', '==', a.classId), where('subjectId', '==', a.subjectId), where('termId', '==', a.termId))]);
+        const asms = asms0.sort((x, y) => (x.date < y.date ? -1 : 1)); ls.sort((x, y) => x.fullName.localeCompare(y.fullName));
+        const mm = {}; ms.forEach(m => (mm[m.assessmentId + '_' + m.learnerId] = m));
+        const rows = ls.map(l => {
+          const mb = {}; asms.forEach(x => (mb[x.id] = mm[x.id + '_' + l.id]));
+          const r = subjectResult(asms, mb);
+          return { l, scores: asms.map(x => (mb[x.id] ? mb[x.id].score : '')), total: r.total, grade: gradeFor(r.total, scales).grade };
+        });
+        const tots = rows.map(r => r.total).filter(t => t != null);
+        const avg = tots.length ? Math.round(tots.reduce((s, t) => s + t, 0) / tots.length * 10) / 10 : '';
+        const head = ['Reg no.', 'Learner', ...asms.map(x => `${x.title} (/${x.outOf})`), 'Total %', 'Grade'];
+        table = [head, ...rows.map(r => [r.l.regNumber, r.l.fullName, ...r.scores, r.total ?? '', r.grade]), ['', 'Class average', ...asms.map(() => ''), avg, '']];
+        $('sh').innerHTML = `<div id="pt"><h3>${esc(ctx.label(a))}</h3><table class="tbl"><thead><tr>${head.map(h => `<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${table.slice(1).map(r => `<tr>${r.map((c, i) => `<td data-l="${esc(head[i])}">${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>${rows.length ? '' : '<p class="muted">No active learners in this class.</p>'}`;
+      } catch (e) { console.error(e); $('sh').innerHTML = '<p class="muted">Could not load the mark sheet.</p>'; }
+    }
+    $('al').onchange = show;
+    $('pr').onclick = () => { const e = main.querySelector('#pt'); e ? printElement(e) : toast('Nothing to print.', 'error'); };
+    $('csv').onclick = () => {
+      if (table.length < 2) return toast('Nothing to export.', 'error');
+      const csv = table.map(r => r.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(',')).join('\r\n');
+      const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); a.download = 'marksheet.csv'; a.click(); URL.revokeObjectURL(a.href);
+    };
+    show();
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load. Refresh and try again.</div>'; }
+});
+</script></body></html>

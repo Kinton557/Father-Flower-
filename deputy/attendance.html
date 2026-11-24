@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Attendance · Deputy · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: attendance and late-coming report per class over the last 14 days, with absence trend. Role: deputy (admin allowed).
+// Collections read: classes, attendance, learners.
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell, setLoading } from '../shared/ui.js';
+import { crud, loadRef } from '../admin/js/crud.js';
+import { DEPUTY_NAV } from './js/nav.js';
+A.requireRole(['deputy', 'admin'], async me => {
+  const main = renderShell({ role: 'deputy', title: 'Attendance', nav: DEPUTY_NAV }); const cw = me.campusId === 'all' ? [] : [fs.where('campusId', '==', me.campusId)];
+  const classes = await loadRef('classes', c => c.name, ...cw).catch(e => { console.error(e); return []; }), $ = id => document.getElementById(id);
+  main.innerHTML = '<select id="k" aria-label="Class" style="min-height:44px"><option value="">Choose a class</option>' + classes.map(c => `<option value="${esc(c.id)}">${esc(c.label)}</option>`).join('') + '</select><div id="o"></div>';
+  $('k').onchange = async e => { const o = $('o'); if (!e.target.value) return o.innerHTML = ''; setLoading(o, true);
+    try {
+      const from = new Date(Date.now() - 13 * 864e5).toISOString().slice(0, 10), [as, ls] = await Promise.all([fs.getDocs(fs.query(fs.collection(db, 'attendance'), fs.where('classId', '==', e.target.value), fs.where('date', '>=', from), fs.limit(30))), fs.getDocs(fs.query(fs.collection(db, 'learners'), fs.where('classId', '==', e.target.value), fs.limit(200)))]);
+      const nm = {}, late = {}; ls.forEach(d => nm[d.id] = d.data().fullName); const days = as.docs.map(d => d.data()).sort((a, b) => a.date.localeCompare(b.date));
+      const rows = days.map(d => { const v = Object.entries(d.records || {}), a = v.filter(x => x[1] === 'absent').length; v.filter(x => x[1] === 'late').forEach(x => late[x[0]] = (late[x[0]] || 0) + 1); return [d.date, v.length ? Math.round((v.length - a) / v.length * 100) : 0, a]; });
+      const lt = Object.entries(late).sort((a, b) => b[1] - a[1]).slice(0, 10);
+      o.innerHTML = rows.length ? '<h2>Daily attendance</h2>' + rows.map(r => `<div class="card" style="padding:8px 16px;margin-top:6px"><div style="display:flex;justify-content:space-between"><span>${esc(r[0])}</span><span>${r[1]}% present · ${r[2]} absent</span></div><div style="height:6px;background:var(--line);border-radius:4px"><div style="width:${r[1]}%;height:6px;background:var(--gold);border-radius:4px"></div></div></div>`).join('') + '<h2 style="margin-top:20px">Most late-comers</h2>' + (lt.length ? lt.map(l => `<div class="card" style="padding:8px 16px;margin-top:6px">${esc(nm[l[0]] || l[0])} · ${l[1]} times</div>`).join('') : '<p>No late-coming recorded.</p>') : '<p>No registers taken in the last 14 days.</p>';
+    } catch (x) { console.error(x); o.innerHTML = '<p role="alert" style="color:var(--danger)">Could not load attendance.</p>'; } setLoading(o, false); };
+});
+</script></body></html>

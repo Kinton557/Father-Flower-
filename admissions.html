@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admissions and Online Application | Father Flower Educational Network</title>
+<meta name="description" content="Apply online to Father Flower Educational Network in Kadoma, Zimbabwe. See how to apply, what you need, fees overview, and submit your application in minutes.">
+<meta name="theme-color" content="#13203F">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Apply to Father Flower Educational Network">
+<meta property="og:description" content="Online applications for primary and high school, boarding and day.">
+<meta property="og:image" content="https://kinton557.github.io/Father-Flower-/assets/og.jpg">
+<link rel="icon" href="assets/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap">
+<link rel="stylesheet" href="css/site.css">
+</head>
+<body data-page="admissions">
+<a class="skip" href="#main">Skip to content</a>
+<div id="site-header"></div>
+<main id="main">
+
+<section class="page-head"><div class="wrap"><p class="eyebrow">Admissions</p><h1>Join Father Flower</h1><p>Apply online in a few minutes. Affordable education for all.</p></div></section>
+
+<section class="section">
+  <div class="wrap">
+    <div class="section-head"><p class="eyebrow">How to apply</p><h2>Four simple steps</h2></div>
+    <ol class="steps">
+      <li><strong>Choose a campus</strong>Pick the school and the form or grade you are applying for.</li>
+      <li><strong>Fill in the online form</strong>Learner and guardian details, boarding or day. Documents are optional now.</li>
+      <li><strong>Keep your reference number</strong>You get it as soon as you submit.</li>
+      <li><strong>Wait for our call</strong>The school office will contact you to confirm the next steps.</li>
+    </ol>
+  </div>
+</section>
+
+<section class="section alt">
+  <div class="wrap split" style="align-items:start">
+    <div>
+      <p class="eyebrow">Requirements</p>
+      <h2>What to bring</h2>
+      <ul class="ticks" id="req-list"></ul>
+      <p class="muted small">You can upload these with the form, or bring copies to the school office.</p>
+    </div>
+    <div>
+      <p class="eyebrow">Fee overview</p>
+      <h2>Fees</h2>
+      <div id="fees"><div class="sk" style="height:120px"></div></div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="apply">
+  <div class="wrap" style="max-width:760px">
+    <div id="apply-intro"><p class="eyebrow">Online application</p><h2>Apply now</h2><p class="muted">Fields marked * are required. Please use your phone number so we can call you.</p></div>
+
+    <div class="form-card">
+      <form id="apply-form" novalidate>
+        <div id="apply-error" class="alert error" role="alert" hidden></div>
+        <div class="hp" aria-hidden="true"><label>Website <input type="text" name="website" tabindex="-1" autocomplete="off"></label></div>
+
+        <fieldset>
+          <legend>School and class</legend>
+          <div class="row c2">
+            <div class="field"><label for="campus" class="req">Campus</label><select id="campus" name="campus" required></select><div class="err"></div></div>
+            <div class="field"><label for="formApplying" class="req">Form or grade</label><select id="formApplying" name="formApplying" required></select><div class="err"></div></div>
+          </div>
+          <div class="field"><span class="lbl req">Boarding or day</span>
+            <div class="choice"><label><input type="radio" name="boarding" value="day" required> Day scholar</label><label><input type="radio" name="boarding" value="boarding"> Boarder</label></div><div class="err"></div></div>
+        </fieldset>
+
+        <fieldset>
+          <legend>About the learner</legend>
+          <div class="row c2">
+            <div class="field"><label for="firstName" class="req">First name</label><input id="firstName" name="firstName" autocomplete="off" required><div class="err"></div></div>
+            <div class="field"><label for="lastName" class="req">Surname</label><input id="lastName" name="lastName" autocomplete="off" required><div class="err"></div></div>
+          </div>
+          <div class="row c2">
+            <div class="field"><label for="gender" class="req">Gender</label><select id="gender" name="gender" required><option value="">Choose</option><option>Female</option><option>Male</option></select><div class="err"></div></div>
+            <div class="field"><label for="dob" class="req">Date of birth</label><input id="dob" name="dob" type="date" required><div class="err"></div></div>
+          </div>
+          <div class="field"><label for="previousSchool">Previous school (if any)</label><input id="previousSchool" name="previousSchool" autocomplete="off"><div class="err"></div></div>
+          <div class="field"><label for="specialNeeds">Anything we should know? (optional)</label><textarea id="specialNeeds" name="specialNeeds" rows="3" placeholder="For example learning support or dietary needs"></textarea><div class="err"></div></div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Parent or guardian</legend>
+          <div class="row c2">
+            <div class="field"><label for="gName" class="req">Full name</label><input id="gName" name="gName" autocomplete="name" required><div class="err"></div></div>
+            <div class="field"><label for="gRelationship" class="req">Relationship to learner</label><select id="gRelationship" name="gRelationship" required><option value="">Choose</option><option>Mother</option><option>Father</option><option>Guardian</option><option>Other relative</option></select><div class="err"></div></div>
+          </div>
+          <div class="row c2">
+            <div class="field"><label for="gPhone" class="req">Phone (WhatsApp if possible)</label><input id="gPhone" name="gPhone" type="tel" inputmode="tel" autocomplete="tel" placeholder="0771 234 567" required><div class="err"></div></div>
+            <div class="field"><label for="gEmail">Email (optional)</label><input id="gEmail" name="gEmail" type="email" autocomplete="email"><div class="err"></div></div>
+          </div>
+          <div class="field"><label for="gAddress" class="req">Home address</label><textarea id="gAddress" name="gAddress" rows="2" autocomplete="street-address" required></textarea><div class="err"></div></div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Documents (optional)</legend>
+          <div class="field"><label for="docs">Birth certificate, last report, ID copy</label><input id="docs" name="docs" type="file" accept="image/*,application/pdf" multiple><ul class="filelist" id="file-list"></ul><div class="hint">Up to 3 files, photos or PDF, 5 MB each.</div><div class="err"></div></div>
+        </fieldset>
+
+        <div class="field"><label class="check"><input type="checkbox" name="consent" required> <span>I confirm the details above are correct and agree that the school may contact me about this application.</span></label><div class="err"></div></div>
+        <button class="btn btn-navy btn-block" id="apply-btn" type="submit">Submit application</button>
+      </form>
+
+      <div id="apply-success" hidden aria-live="polite">
+        <div class="alert ok"><strong>Application received.</strong> Thank you.</div>
+        <p>Your reference number:</p>
+        <div class="ref" id="ref-number"></div>
+        <p class="small muted" style="margin-top:10px">Please keep this number. The school office will contact you to confirm the next steps. Questions? Call <span id="success-phone"></span>.</p>
+        <p class="small" id="success-extra"></p>
+        <div class="actions"><button type="button" class="btn btn-gold" id="copy-ref">Copy number</button><a class="btn btn-ghost" style="color:var(--navy)" href="index.html">Back to home</a></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+<div id="site-footer"></div>
+<script type="module" src="js/site/admissions.js"></script>
+</body>
+</html>

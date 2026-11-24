@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Approvals · Head · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: head previews draft report cards, adds the head's comment, approves; lists serious discipline cases. Role: head (admin allowed).
+// Collections: reports (update), learners (read), discipline (read), auditLog.
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, modal, renderShell, setLoading } from '../shared/ui.js';
+import { HEAD_NAV } from './js/nav.js';
+const $ = id => document.getElementById(id), col = n => fs.collection(db, n);
+A.requireRole(['head', 'admin'], async me => {
+  const main = renderShell({ role: 'head', title: 'Approvals', nav: HEAD_NAV });
+  main.innerHTML = `<h2>Report cards awaiting approval</h2><div id="r"></div><h2 style="margin-top:24px">Recent discipline cases</h2><div id="d"></div>`;
+  let reps = [], names = {};
+  async function loadReports() {
+    setLoading($('r'), true);
+    try {
+      reps = (await fs.getDocs(fs.query(col('reports'), fs.where('status', '==', 'draft'), fs.limit(50)))).docs.map(d => ({ id: d.id, ...d.data() }));
+      await Promise.all(reps.map(async r => { if (!names[r.learnerId]) names[r.learnerId] = (await fs.getDoc(fs.doc(db, 'learners', r.learnerId))).data()?.fullName || r.learnerId; }));
+      $('r').innerHTML = reps.length ? reps.map(r => `<div class="card" style="padding:12px 16px;margin-bottom:8px"><strong>${esc(names[r.learnerId])}</strong><div style="color:var(--muted);font-size:.9rem">Average ${esc(r.average ?? '–')} · class position ${esc(r.positionInClass ?? '–')}</div><button class="btn btn-primary" style="min-height:44px;margin-top:8px" data-id="${esc(r.id)}">Preview and approve</button></div>`).join('') : '<p>No report cards are waiting. Well done.</p>';
+    } catch (e) { console.error(e); $('r').innerHTML = `<p role="alert" style="color:var(--danger)">Could not load reports.</p>`; }
+    setLoading($('r'), false);
+  }
+  async function loadCases() {
+    try { const rows = (await fs.getDocs(fs.query(col('discipline'), fs.where('type', '==', 'case'), fs.limit(20)))).docs.map(d => d.data());
+      $('d').innerHTML = rows.length ? rows.map(c => `<div class="card" style="padding:10px 16px;margin-bottom:6px">${esc(c.description)} <span style="color:var(--muted)">${esc(c.learnerId)} · ${c.parentNotified ? 'parent notified' : 'parent not yet notified'}</span></div>`).join('') : '<p>No cases recorded.</p>';
+    } catch (e) { console.error(e); $('d').innerHTML = '<p role="alert" style="color:var(--danger)">Could not load cases.</p>'; }
+  }
+  main.addEventListener('click', e => {
+    const b = e.target.closest('[data-id]'); if (!b) return; const r = reps.find(x => x.id === b.dataset.id);
+    modal({ title: names[r.learnerId], bodyHTML: `<div style="overflow-x:auto"><table style="width:100%"><tr><th align="left">Subject</th><th>CW</th><th>Exam</th><th>Total</th><th>Grade</th></tr>${(r.subjects || []).map(s => `<tr><td>${esc(s.name)}</td><td align="center">${esc(s.courseworkMark)}</td><td align="center">${esc(s.examMark)}</td><td align="center">${esc(s.total)}</td><td align="center">${esc(s.grade)}</td></tr>`).join('')}</table></div><p>Average ${esc(r.average)} · class ${esc(r.positionInClass)} · form ${esc(r.positionInForm)}<br>Class teacher: ${esc(r.classTeacherComment || 'none yet')}</p><label>Head's comment<textarea id="hc" rows="3" style="width:100%;padding:8px">${esc(r.headComment || '')}</textarea></label>`,
+      actions: [{ label: 'Approve', primary: true, onClick: async () => { try { await fs.updateDoc(fs.doc(db, 'reports', r.id), { headComment: $('hc').value.trim(), status: 'approved', approvedBy: me.uid, updatedAt: fs.serverTimestamp() }); await A.audit('report.approve', 'reports/' + r.id, {}); toast('Approved', 'success'); loadReports(); } catch (x) { console.error(x); toast('Could not approve.', 'error'); return false; } } },
+        { label: 'Save comment only', onClick: async () => { try { await fs.updateDoc(fs.doc(db, 'reports', r.id), { headComment: $('hc').value.trim(), updatedAt: fs.serverTimestamp() }); toast('Comment saved; the report stays a draft.', 'success'); } catch (x) { console.error(x); toast('Could not save.', 'error'); return false; } } }, { label: 'Close' }] });
+  });
+  loadReports(); loadCases();
+});
+</script></body></html>

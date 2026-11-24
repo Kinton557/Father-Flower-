@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Expenditure | Bursar</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="./css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * bursar/expenditure.html
+ * Purpose: expenditure vouchers (sent to the SDC for approval, then paid), suppliers, and petty cash ledger.
+ * Role allowed: bursar, admin.
+ * Collections used: expenditures, suppliers, pettyCash, settings/school.
+ */
+import { requireRole } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell, fmtDate } from '../shared/ui.js';
+import { mountCrud } from './js/crud.js';
+import { BURSAR_NAV, CATEGORIES, METHODS, usd, todayISO, tabs, printHTML, getSchool, showErr } from './js/common.js';
+
+const STATUS = { requested: ['Waiting for SDC', 'warn'], sdc_approved: ['SDC approved', 'ok'], sdc_rejected: ['SDC declined', 'bad'], head_approved: ['Head approved', 'ok'], head_rejected: ['Head declined', 'bad'], paid: ['Paid', 'ok'] };
+const voucherNo = () => `V${todayISO().replace(/-/g, '').slice(2)}-${Math.floor(1000 + Math.random() * 9000)}`;
+
+requireRole(['bursar', 'admin'], async (profile) => {
+  const main = renderShell({ role: profile.role, title: 'Expenditure', nav: BURSAR_NAV });
+  main.innerHTML = `<div class="b-head"><h1>Expenditure</h1></div>
+    <div class="b-tabs" role="tablist"><button data-tab="v" type="button" role="tab">Vouchers</button><button data-tab="s" type="button" role="tab">Suppliers</button><button data-tab="p" type="button" role="tab">Petty cash</button></div>
+    <div data-panel="v"></div><div data-panel="s" hidden></div><div data-panel="p" hidden></div>`;
+  const mounted = {};
+  let school = {};
+  try { school = await getSchool(); } catch (e) { console.error(e); }
+
+  const voucherCfg = {
+    collection: 'expenditures', newLabel: 'New voucher', empty: 'No vouchers yet.', auditSave: true, noDelete: false,
+    canDeleteRow: (r) => r.status === 'requested',
+    canEditRow: (r) => ['requested', 'sdc_rejected', 'head_rejected'].includes(r.status),
+    defaults: () => ({ status: 'requested', voucherNumber: voucherNo() }),
+    sort: (a, b) => (b.date || '').localeCompare(a.date || ''),
+    fields: [
+      { key: 'date', label: 'Date', type: 'date', required: true, today: true },
+      { key: 'category', label: 'Category', type: 'select', required: true, options: CATEGORIES },
+      { key: 'supplierName', label: 'Supplier or payee', type: 'text', required: true, max: 120 },
+      { key: 'description', label: 'What is it for', type: 'textarea', required: true, wide: true },
+      { key: 'amountCents', label: 'Amount (USD)', type: 'money', required: true },
+      { key: 'paymentMethod', label: 'Pay from', type: 'select', required: true, options: [{ v: 'bank', l: 'Bank' }, { v: 'cash', l: 'Cash' }, { v: 'ecocash', l: 'EcoCash' }, { v: 'petty', l: 'Petty cash' }] }
+    ],
+    columns: [
+      { label: 'Voucher', html: (r) => `${esc(r.voucherNumber || '')}<br><small>${esc(fmtDate(r.date))}</small>` },
+      { label: 'Payee', html: (r) => `${esc(r.supplierName || '')}<br><small>${esc(r.category || '')}</small>` },
+      { label: 'Amount', type: 'money', key: 'amountCents' },
+      { label: 'Status', html: (r) => { const s = STATUS[r.status] || [r.status, '']; return `<span class="b-tag ${s[1]}">${esc(s[0])}</span>${r.sdcComment ? `<br><small>SDC: ${esc(r.sdcComment)}</small>` : ''}`; } }
+    ],
+    summary: async (rows) => {
+      const sum = (f) => rows.filter(f).reduce((s, r) => s + (r.amountCents || 0), 0);
+      return `<div class="b-cards"><div class="b-card"><div class="k">Waiting for approval</div><div class="v">${usd(sum((r) => r.status === 'requested'))}</div></div>
+        <div class="b-card"><div class="k">Approved, not yet paid</div><div class="v">${usd(sum((r) => ['sdc_approved', 'head_approved'].includes(r.status)))}</div></div>
+        <div class="b-card"><div class="k">Paid</div><div class="v">${usd(sum((r) => r.status === 'paid'))}</div></div></div>`;
+    },
+    rowActions: [
+      { label: 'Mark paid', show: (r) => ['sdc_approved', 'head_approved'].includes(r.status) || (r.status === 'requested' && r.paymentMethod === 'petty'),
+        run: async (r, { profile: p, reload }) => {
+          const b = fs.writeBatch(db);
+          b.update(fs.doc(db, 'expenditures', r.id), { status: 'paid', paidOn: todayISO(), paidBy: p.uid, paidByName: p.fullName || '', updatedAt: fs.serverTimestamp() });
+          if (r.paymentMethod === 'petty') b.set(fs.doc(fs.collection(db, 'pettyCash')), { campusId: r.campusId, date: todayISO(), type: 'out', amountCents: r.amountCents, description: `Voucher ${r.voucherNumber}: ${r.description}`.slice(0, 200), expenditureId: r.id, createdAt: fs.serverTimestamp(), createdBy: p.uid, updatedAt: fs.serverTimestamp() });
+          await b.commit();
+          toast('Marked as paid', 'success');
+          reload();
+        } },
+      { label: 'Send again', show: (r) => ['sdc_rejected', 'head_rejected'].includes(r.status),
+        run: async (r, { reload }) => { await fs.updateDoc(fs.doc(db, 'expenditures', r.id), { status: 'requested', updatedAt: fs.serverTimestamp() }); toast('Sent for approval again', 'success'); reload(); } },
+      { label: 'Print voucher',
+        run: async (r) => {
+          printHTML(`<div class="rc"><div class="rc-top"><strong>${esc(school.name || 'Father Flower Educational Network')}</strong><div class="rc-sm">${esc(school.address || '')}</div></div>
+            <h2>Payment voucher ${esc(r.voucherNumber || '')}</h2>
+            <table class="rc-t"><tr><th>Date</th><td>${esc(r.date)}</td></tr><tr><th>Payee</th><td>${esc(r.supplierName)}</td></tr><tr><th>Category</th><td>${esc(r.category)}</td></tr>
+            <tr><th>Details</th><td>${esc(r.description)}</td></tr><tr><th>Pay from</th><td>${esc(METHODS[r.paymentMethod] || (r.paymentMethod === 'petty' ? 'Petty cash' : r.paymentMethod))}</td></tr>
+            <tr><th>Status</th><td>${esc((STATUS[r.status] || [r.status])[0])}</td></tr><tr><th>SDC comment</th><td>${esc(r.sdcComment || '')}</td></tr></table>
+            <div class="rc-amt"><span>Amount</span><strong>${usd(r.amountCents)}</strong></div>
+            <div class="rc-sig">Prepared by: ____________________ &nbsp; Approved by: ____________________</div><div class="rc-sig">Received by: ____________________ &nbsp; Date: ______________</div></div>`, 'a4');
+        } }
+    ]
+  };
+  const supplierCfg = {
+    collection: 'suppliers', newLabel: 'Add supplier', empty: 'No suppliers yet.', auditSave: false,
+    sort: (a, b) => (a.name || '').localeCompare(b.name || ''),
+    fields: [
+      { key: 'name', label: 'Supplier name', type: 'text', required: true, max: 120 },
+      { key: 'contactPerson', label: 'Contact person', type: 'text' },
+      { key: 'phone', label: 'Phone', type: 'text', max: 30 },
+      { key: 'email', label: 'Email', type: 'text', max: 120 },
+      { key: 'category', label: 'Supplies', type: 'select', options: CATEGORIES },
+      { key: 'address', label: 'Address and notes', type: 'textarea', wide: true }
+    ]
+  };
+  const pettyCfg = {
+    collection: 'pettyCash', newLabel: 'Add petty cash entry', empty: 'No petty cash entries yet.', noEdit: true, noDelete: true,
+    sort: (a, b) => (b.date || '').localeCompare(a.date || ''),
+    fields: [
+      { key: 'date', label: 'Date', type: 'date', required: true, today: true },
+      { key: 'type', label: 'Type', type: 'select', required: true, options: [{ v: 'in', l: 'Cash in (float top-up)' }, { v: 'out', l: 'Cash out (spent)' }] },
+      { key: 'amountCents', label: 'Amount (USD)', type: 'money', required: true },
+      { key: 'description', label: 'Description', type: 'text', required: true, max: 200 }
+    ],
+    columns: [
+      { label: 'Date', key: 'date', type: 'date' },
+      { label: 'Type', html: (r) => (r.type === 'in' ? '<span class="b-tag ok">In</span>' : '<span class="b-tag warn">Out</span>') },
+      { label: 'Amount', type: 'money', key: 'amountCents' },
+      { label: 'Description', key: 'description' }
+    ],
+    summary: async (rows) => {
+      const bal = rows.reduce((s, r) => s + (r.type === 'in' ? 1 : -1) * (r.amountCents || 0), 0);
+      return `<div class="b-cards"><div class="b-card"><div class="k">Petty cash balance</div><div class="v ${bal < 0 ? 'b-pos' : ''}">${usd(bal)}</div></div></div>`;
+    }
+  };
+  const map = { v: voucherCfg, s: supplierCfg, p: pettyCfg };
+  tabs(main, async (name) => {
+    if (mounted[name]) return;
+    mounted[name] = true;
+    const host = main.querySelector(`[data-panel="${name}"]`);
+    try { await mountCrud(host, map[name], profile); } catch (e) { showErr(host, e); }
+  })('v');
+});
+</script>
+</body>
+</html>

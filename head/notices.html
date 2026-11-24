@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Notices · Head · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: head sends notices to staff, parents or learners. Role: head (admin allowed). Collections: notices (create, read, delete).
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, confirmBox, fmtDate, renderShell, setLoading } from '../shared/ui.js';
+import { HEAD_NAV } from './js/nav.js';
+const $ = id => document.getElementById(id), S = 'display:block;width:100%;min-height:44px;padding:8px;border:1px solid var(--line);border-radius:10px;margin-bottom:10px';
+A.requireRole(['head', 'admin'], me => {
+  const main = renderShell({ role: 'head', title: 'Notices', nav: HEAD_NAV });
+  main.innerHTML = `<div class="card" style="padding:16px;margin-bottom:16px"><label>Title<input id="t" style="${S}"></label><label>Message<textarea id="b" rows="4" style="${S}"></textarea></label><label>Send to<select id="a" multiple style="${S}"><option value="teacher">Teachers</option><option value="staff">All staff</option><option value="parent">Parents</option><option value="learner">Learners</option></select></label><label><input id="p" type="checkbox"> Pin to the top</label><br><button id="send" class="btn btn-primary" style="min-height:44px;margin-top:10px">Send notice</button></div><div id="list"></div>`;
+  async function list() {
+    setLoading($('list'), true);
+    try { const cs = [fs.collection(db, 'notices')]; if (me.campusId !== 'all') cs.push(fs.where('campusId', 'in', [me.campusId, 'all'])); cs.push(fs.limit(50));
+      const rows = (await fs.getDocs(fs.query(...cs))).docs.map(d => ({ id: d.id, ...d.data() }));
+      $('list').innerHTML = rows.length ? rows.map(r => `<div class="card" style="padding:12px 16px;margin-bottom:8px"><strong>${esc(r.title)}</strong> <span style="color:var(--muted)">${esc((r.audience || []).join(', '))} · ${esc(fmtDate(r.createdAt))}</span><p>${esc(r.body)}</p><button class="btn" style="min-height:44px" data-id="${esc(r.id)}">Delete</button></div>`).join('') : '<p>No notices yet. Write one above.</p>';
+    } catch (e) { console.error(e); $('list').innerHTML = `<p role="alert" style="color:var(--danger)">Could not load notices.</p>`; }
+    setLoading($('list'), false);
+  }
+  $('send').onclick = async () => {
+    const d = { title: $('t').value.trim(), body: $('b').value.trim(), audience: [...$('a').selectedOptions].map(o => o.value), campusId: me.campusId, pinned: $('p').checked, publishAt: new Date().toISOString().slice(0, 10) };
+    if (!d.title || !d.body || !d.audience.length) return toast('Add a title, a message and at least one audience.', 'error');
+    try { const r = await fs.addDoc(fs.collection(db, 'notices'), { ...d, createdAt: fs.serverTimestamp(), createdBy: me.uid, updatedAt: fs.serverTimestamp() }); await A.audit('notice.send', 'notices/' + r.id, { audience: d.audience }); toast('Notice sent', 'success'); $('t').value = $('b').value = ''; list(); } catch (e) { console.error(e); toast('Could not send.', 'error'); }
+  };
+  main.addEventListener('click', async e => { const b = e.target.closest('[data-id]'); if (b && await confirmBox('Delete this notice?')) { try { await fs.deleteDoc(fs.doc(db, 'notices', b.dataset.id)); await A.audit('notice.delete', 'notices/' + b.dataset.id, {}); list(); } catch (x) { console.error(x); toast('Could not delete.', 'error'); } } });
+  list();
+});
+</script></body></html>

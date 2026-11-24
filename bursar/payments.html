@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Payments | Bursar</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="./css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * bursar/payments.html
+ * Purpose: record payments with an auto-numbered receipt (one transaction), reprint receipts (A4 or 80 mm thermal),
+ *          request payment reversals (bursar) and approve or reject them (admin or head only).
+ * Role allowed: bursar, admin, head (head sees reversal approvals only).
+ * Collections used: payments, accounts, counters (receipt numbers), financeSummary, campuses, terms, auditLog.
+ */
+import { requireRole, audit } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, confirmBox, renderShell, fmtDate } from '../shared/ui.js';
+import { navFor, searchAccounts, campusScope, loadCampuses, loadTerms, getSchool, pickCurrentTerm, termLabel, opts, toCents, usd, todayISO, tabs, printHTML, receiptHTML, METHODS, showErr, tsMillis } from './js/common.js';
+
+requireRole(['bursar', 'admin', 'head'], async (profile) => {
+  const isHead = profile.role === 'head';
+  const canApprove = profile.role === 'admin' || isHead;
+  const main = renderShell({ role: profile.role, title: 'Payments', nav: navFor(profile.role) });
+  main.innerHTML = `
+    <div class="b-head"><h1>${isHead ? 'Payment reversals' : 'Payments'}</h1></div>
+    <div class="b-tabs" role="tablist">
+      ${isHead ? '' : '<button data-tab="rec" type="button" role="tab">Record payment</button><button data-tab="list" type="button" role="tab">Payments list</button>'}
+      <button data-tab="rev" type="button" role="tab">Reversal requests <span id="revCount" class="b-tag"></span></button>
+    </div>
+    ${isHead ? '' : `
+    <div data-panel="rec">
+      <section class="b-panel">
+        <h2 class="b-h2">1. Find the learner</h2>
+        <div class="b-filters"><label>Reg number or name<input id="q" type="search" placeholder="e.g. J0016 or Tendai Moyo" autocomplete="off"></label></div>
+        <div class="b-actions" style="margin:0 0 10px"><button class="b-btn" id="find" type="button">Find</button></div>
+        <div id="hits"></div>
+      </section>
+      <section class="b-panel" id="payBox" hidden></section>
+      <section class="b-panel" id="rcpt" hidden></section>
+    </div>
+    <div data-panel="list" hidden>
+      <div class="b-filters">
+        <label>Date<input type="date" id="lDate"></label>
+        <label id="lCampusWrap">Campus<select id="lCampus"></select></label>
+      </div>
+      <div id="lSum"></div><div id="lList"><div class="b-skel"></div></div>
+    </div>`}
+    <div data-panel="rev" hidden><div id="revList"><div class="b-skel"></div></div></div>
+    <dialog id="dlg" style="border:1px solid var(--line);border-radius:14px;max-width:min(520px,94vw);width:100%;padding:18px;background:var(--paper);color:var(--ink)"></dialog>`;
+  const $ = (s) => main.querySelector(s);
+  const dlg = $('#dlg');
+  const showTab = tabs(main);
+
+  let campuses = [], terms = [], school = {};
+  try { [campuses, terms, school] = await Promise.all([loadCampuses(profile), loadTerms(), getSchool()]); }
+  catch (e) { showErr($('[data-panel]') || main, e); return; }
+  const campusName = (id) => (campuses.find((c) => c.id === id) || {}).name || id || '';
+  const curTerm = pickCurrentTerm(terms, school);
+  const code = (id) => (campusName(id).replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase() || 'FF');
+  const termText = (id) => termLabel(terms.find((t) => t.id === id));
+
+  /* ---------- dialog helper ---------- */
+  function ask({ title, label, confirmText, danger }) {
+    return new Promise((resolve) => {
+      dlg.innerHTML = `<form method="dialog"><h2 class="b-h2">${esc(title)}</h2>
+        <label style="display:flex;flex-direction:column;gap:4px;font-size:.9rem">${esc(label)}<textarea id="dlgTxt" class="b-in" rows="4" maxlength="400" style="min-height:90px"></textarea></label>
+        <p id="dlgErr" class="b-err" hidden></p>
+        <div class="b-actions"><button class="b-btn ${danger ? 'b-danger' : ''}" value="ok" id="dlgOk">${esc(confirmText)}</button><button class="b-btn b-ghost" value="cancel" formnovalidate>Cancel</button></div></form>`;
+      const ok = dlg.querySelector('#dlgOk');
+      const onClose = () => { dlg.removeEventListener('close', onClose); resolve(dlg.returnValue === 'ok' ? dlg.querySelector('#dlgTxt').value.trim() : null); };
+      ok.addEventListener('click', (e) => {
+        const v = dlg.querySelector('#dlgTxt').value.trim();
+        if (v.length < 10) { e.preventDefault(); const er = dlg.querySelector('#dlgErr'); er.hidden = false; er.textContent = 'Please write at least 10 characters.'; }
+      });
+      dlg.addEventListener('close', onClose);
+      dlg.returnValue = '';
+      dlg.showModal();
+    });
+  }
+
+  /* ---------- record payment ---------- */
+  let selected = null;
+  let payRef = null;
+  const newPayRef = () => { payRef = fs.doc(fs.collection(db, 'payments')); };
+  newPayRef();
+
+  async function findLearner() {
+    const hits = $('#hits');
+    const q = $('#q').value.trim();
+    if (!q) { toast('Type a reg number or name.', 'info'); return; }
+    hits.innerHTML = '<div class="b-skel"></div>';
+    try {
+      const found = await searchAccounts(profile, q);
+      if (!found.length) { hits.innerHTML = '<div class="b-empty">No account found. If the learner is new, open accounts first on the Accounts page.</div>'; return; }
+      hits.innerHTML = found.map((a) => `<button type="button" class="b-hit" data-pick="${esc(a.id)}">${esc(a.learnerName)} <small>${esc(a.regNumber || a.id)} | ${esc(a.form || '')} | ${esc(campusName(a.campusId))}</small> <strong style="float:right">${usd(a.balanceCents)}</strong></button>`).join('');
+      hits._data = found;
+    } catch (e) { showErr(hits, e); }
+  }
+
+  function pick(a) {
+    selected = a;
+    newPayRef();
+    $('#rcpt').hidden = true;
+    const box = $('#payBox');
+    box.hidden = false;
+    box.innerHTML = `<h2 class="b-h2">2. Payment details</h2>
+      <div class="b-cards"><div class="b-card"><div class="k">Learner</div><div class="v" style="font-size:1.1rem">${esc(a.learnerName)}</div><div class="n">${esc(a.regNumber || a.id)} | ${esc(a.form || '')}</div></div>
+      <div class="b-card"><div class="k">Balance owing</div><div class="v ${a.balanceCents > 0 ? 'b-pos' : ''}">${usd(a.balanceCents)}</div></div></div>
+      <form id="payForm" class="b-form" novalidate>
+        <label>Amount received (USD)<input name="amt" inputmode="decimal" placeholder="0.00" required autocomplete="off"></label>
+        <label>Method<select name="method"><option value="cash">Cash</option><option value="ecocash">EcoCash</option><option value="bank">Bank</option></select></label>
+        <label>Reference<input name="ref" maxlength="60" placeholder="EcoCash or bank reference" autocomplete="off"></label>
+        <label>Date paid<input type="date" name="paidOn" value="${todayISO()}" max="${todayISO()}" required></label>
+        <label>Term<select name="termId">${opts(terms, (t) => t.id, termLabel, curTerm ? curTerm.id : '')}</select></label>
+        <div class="b-actions b-wide"><button class="b-btn" id="saveBtn" type="submit">Record payment and issue receipt</button></div>
+      </form>`;
+    box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const form = $('#payForm');
+    form.method.addEventListener('change', () => { form.ref.placeholder = form.method.value === 'cash' ? 'Optional for cash' : 'Required'; });
+    form.addEventListener('submit', submitPayment);
+    form.amt.focus();
+  }
+
+  $('#hits').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-pick]');
+    if (!b) return;
+    pick($('#hits')._data.find((x) => x.id === b.dataset.pick));
+  });
+  $('#find').addEventListener('click', findLearner);
+  $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter') findLearner(); });
+
+  async function submitPayment(ev) {
+    ev.preventDefault();
+    const f = ev.target;
+    const btn = $('#saveBtn');
+    const amt = toCents(f.amt.value);
+    const method = f.method.value;
+    const reference = f.ref.value.trim();
+    const paidOn = f.paidOn.value;
+    const termId = f.termId.value;
+    if (!(amt > 0) || amt > 100000000) { toast('Enter an amount above zero.', 'error'); return; }
+    if (method !== 'cash' && reference.length < 4) { toast('Enter the EcoCash or bank reference.', 'error'); return; }
+    if (!paidOn || paidOn > todayISO()) { toast('The payment date cannot be in the future.', 'error'); return; }
+    if (!termId) { toast('Choose a term.', 'error'); return; }
+    btn.disabled = true;
+    try {
+      if (method !== 'cash') {
+        const dup = await fs.getDocs(fs.query(fs.collection(db, 'payments'), fs.where('reference', '==', reference), fs.limit(1)));
+        if (!dup.empty && dup.docs[0].id !== payRef.id) {
+          if (!(await confirmBox(`The reference ${reference} was already used on receipt ${dup.docs[0].data().receiptNumber}. Record it again?`))) { btn.disabled = false; return; }
+        }
+      }
+      const bal = selected.balanceCents || 0;
+      if (amt > bal && !(await confirmBox(`${usd(amt)} is more than the balance of ${usd(bal)}. The extra will show as a credit. Continue?`))) { btn.disabled = false; return; }
+      const accRef = fs.doc(db, 'accounts', selected.id);
+      const ref = payRef;
+      const result = await fs.runTransaction(db, async (tx) => {
+        const again = await tx.get(ref);
+        if (again.exists()) return { dup: true, p: again.data() };
+        const accSnap = await tx.get(accRef);
+        if (!accSnap.exists()) throw new Error('This learner has no finance account.');
+        const a = accSnap.data();
+        const ctrRef = fs.doc(db, 'counters', `receipt_${a.campusId}`);
+        const ctrSnap = await tx.get(ctrRef);
+        const next = ctrSnap.exists() ? (ctrSnap.data().next || 1) : 1;
+        const receiptNumber = `RC-${code(a.campusId)}-${String(next).padStart(6, '0')}`;
+        const balanceAfterCents = (a.balanceCents || 0) - amt;
+        const p = {
+          learnerId: selected.id, regNumber: a.regNumber || selected.id, learnerName: a.learnerName || '', form: a.form || '', campusId: a.campusId,
+          amountCents: amt, method, reference, receiptNumber, termId, paidOn, balanceAfterCents,
+          receivedBy: profile.uid, receivedByName: profile.fullName || '', reversed: false, reversalReason: '', reversalStatus: 'none',
+          createdAt: fs.serverTimestamp(), createdBy: profile.uid, updatedAt: fs.serverTimestamp()
+        };
+        tx.set(ctrRef, { campusId: a.campusId, next: next + 1, updatedAt: fs.serverTimestamp() }, { merge: true });
+        tx.set(ref, p);
+        tx.update(accRef, { totalPaidCents: fs.increment(amt), balanceCents: fs.increment(-amt), updatedAt: fs.serverTimestamp() });
+        tx.set(fs.doc(db, 'financeSummary', `${a.campusId}_${termId}`), { campusId: a.campusId, termId, collectedCents: fs.increment(amt), updatedAt: fs.serverTimestamp() }, { merge: true });
+        return { dup: false, p };
+      });
+      if (result.dup) toast('This payment was already recorded. Nothing was added twice.', 'info');
+      else toast('Payment recorded', 'success');
+      showReceipt(result.p, false);
+      $('#payBox').hidden = true;
+      selected = null;
+      newPayRef();
+      $('#hits').innerHTML = '';
+      $('#q').value = '';
+    } catch (e) {
+      toast('Not saved: ' + (e.message || 'try again'), 'error');
+      btn.disabled = false;
+    }
+  }
+
+  function showReceipt(p, duplicate) {
+    const box = $('#rcpt');
+    box.hidden = false;
+    const html = receiptHTML({ school, campusName: campusName(p.campusId), p, termText: termText(p.termId), balanceAfter: p.balanceAfterCents, duplicate });
+    box.innerHTML = `<h2 class="b-h2">Receipt ${esc(p.receiptNumber)}</h2><div style="background:#fff;color:#111;border-radius:10px;padding:8px;border:1px solid var(--line)">${html}</div>
+      <div class="b-actions"><button class="b-btn" id="prA4" type="button">Print A4 or save PDF</button><button class="b-btn b-ghost" id="prTh" type="button">Print thermal (80 mm)</button></div>`;
+    $('#prA4').addEventListener('click', () => printHTML(html, 'a4'));
+    $('#prTh').addEventListener('click', () => printHTML(html, 'thermal'));
+    box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  /* ---------- payments list ---------- */
+  let listRows = [];
+  async function loadList() {
+    const out = $('#lList');
+    out.innerHTML = '<div class="b-skel"></div>';
+    try {
+      const date = $('#lDate').value || todayISO();
+      const cid = campusScope(profile) || $('#lCampus').value;
+      const cons = [fs.where('paidOn', '==', date)];
+      if (cid) cons.push(fs.where('campusId', '==', cid));
+      const snap = await fs.getDocs(fs.query(fs.collection(db, 'payments'), ...cons, fs.limit(300)));
+      listRows = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => tsMillis(b.createdAt) - tsMillis(a.createdAt));
+      const live = listRows.filter((p) => !p.reversed);
+      const by = { cash: 0, ecocash: 0, bank: 0 };
+      live.forEach((p) => { by[p.method] = (by[p.method] || 0) + (p.amountCents || 0); });
+      $('#lSum').innerHTML = `<div class="b-cards"><div class="b-card"><div class="k">Total for the day</div><div class="v">${usd(live.reduce((s, p) => s + p.amountCents, 0))}</div><div class="n">${live.length} receipts</div></div>
+        ${Object.keys(METHODS).map((m) => `<div class="b-card"><div class="k">${METHODS[m]}</div><div class="v">${usd(by[m])}</div></div>`).join('')}</div>`;
+      if (!listRows.length) { out.innerHTML = '<div class="b-empty">No payments on this date.</div>'; return; }
+      out.innerHTML = `<table class="b-table stack"><thead><tr><th>Receipt</th><th>Learner</th><th>Method</th><th>Reference</th><th class="b-num">Amount</th><th>Status</th><th></th></tr></thead><tbody>
+        ${listRows.map((p) => `<tr><td data-label="Receipt">${esc(p.receiptNumber)}</td><td data-label="Learner">${esc(p.learnerName)}<br><small>${esc(p.regNumber)}</small></td><td data-label="Method">${esc(METHODS[p.method] || p.method)}</td><td data-label="Reference">${esc(p.reference || '')}</td><td data-label="Amount" class="b-num">${usd(p.amountCents)}</td>
+          <td data-label="Status">${p.reversed ? '<span class="b-tag bad">Reversed</span>' : p.reversalStatus === 'requested' ? '<span class="b-tag warn">Reversal requested</span>' : p.reversalStatus === 'rejected' ? '<span class="b-tag">Reversal declined</span>' : '<span class="b-tag ok">Paid</span>'}</td>
+          <td><div class="b-actions" style="margin:0"><button class="b-btn b-ghost" data-rc="${esc(p.id)}" type="button">Receipt</button>${!p.reversed && p.reversalStatus !== 'requested' ? `<button class="b-btn b-ghost" data-rq="${esc(p.id)}" type="button">Request reversal</button>` : ''}</div></td></tr>`).join('')}</tbody></table>`;
+    } catch (e) { showErr(out, e); }
+  }
+
+  async function requestReversal(id) {
+    const p = listRows.find((x) => x.id === id);
+    const reason = await ask({ title: `Request reversal of ${p.receiptNumber}`, label: 'Reason for the reversal (an admin or head must approve)', confirmText: 'Send request' });
+    if (!reason) return;
+    try {
+      await fs.runTransaction(db, async (tx) => {
+        const ref = fs.doc(db, 'payments', id);
+        const s = await tx.get(ref);
+        if (!s.exists()) throw new Error('Payment not found.');
+        const d = s.data();
+        if (d.reversed) throw new Error('Already reversed.');
+        if (d.reversalStatus === 'requested') throw new Error('A reversal is already waiting for approval.');
+        tx.update(ref, { reversalStatus: 'requested', reversalRequest: { reason, requestedBy: profile.uid, requestedByName: profile.fullName || '', requestedAt: fs.serverTimestamp() }, updatedAt: fs.serverTimestamp() });
+      });
+      await audit('payment.reversalRequested', `payments/${id}`, { receipt: p.receiptNumber, amountCents: p.amountCents, reason });
+      toast('Reversal request sent for approval', 'success');
+      loadList(); loadRev();
+    } catch (e) { toast(e.message || 'Could not send request', 'error'); }
+  }
+
+  /* ---------- reversal requests ---------- */
+  let revRows = [];
+  async function loadRev() {
+    const out = $('#revList');
+    out.innerHTML = '<div class="b-skel"></div>';
+    try {
+      const cons = [fs.where('reversalStatus', '==', 'requested')];
+      const sc = campusScope(profile);
+      if (sc) cons.push(fs.where('campusId', '==', sc));
+      const snap = await fs.getDocs(fs.query(fs.collection(db, 'payments'), ...cons, fs.limit(50)));
+      revRows = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      $('#revCount').textContent = revRows.length || '';
+      if (!revRows.length) { out.innerHTML = '<div class="b-empty">No reversal requests waiting.</div>'; return; }
+      out.innerHTML = `<table class="b-table stack"><thead><tr><th>Receipt</th><th>Learner</th><th class="b-num">Amount</th><th>Reason</th><th>Requested by</th><th></th></tr></thead><tbody>
+        ${revRows.map((p) => `<tr><td data-label="Receipt">${esc(p.receiptNumber)}<br><small>${esc(fmtDate(p.paidOn))}</small></td><td data-label="Learner">${esc(p.learnerName)}<br><small>${esc(p.regNumber)}</small></td><td data-label="Amount" class="b-num">${usd(p.amountCents)}</td>
+          <td data-label="Reason">${esc((p.reversalRequest || {}).reason || '')}</td><td data-label="Requested by">${esc((p.reversalRequest || {}).requestedByName || '')}</td>
+          <td>${canApprove ? `<div class="b-actions" style="margin:0"><button class="b-btn b-danger" data-ap="${esc(p.id)}" type="button">Approve</button><button class="b-btn b-ghost" data-rj="${esc(p.id)}" type="button">Decline</button></div>` : '<span class="b-tag warn">Waiting for admin or head</span>'}</td></tr>`).join('')}</tbody></table>`;
+    } catch (e) { showErr(out, e); }
+  }
+
+  async function decide(id, approve) {
+    const p = revRows.find((x) => x.id === id);
+    if (approve && p.reversalRequest && p.reversalRequest.requestedBy === profile.uid) { toast('You requested this reversal. Someone else must approve it.', 'error'); return; }
+    const note = await ask({ title: `${approve ? 'Approve' : 'Decline'} reversal of ${p.receiptNumber}`, label: 'Approver note (required)', confirmText: approve ? 'Approve and reverse' : 'Decline request', danger: approve });
+    if (!note) return;
+    try {
+      if (approve) {
+        await fs.runTransaction(db, async (tx) => {
+          const ref = fs.doc(db, 'payments', id);
+          const s = await tx.get(ref);
+          if (!s.exists()) throw new Error('Payment not found.');
+          const d = s.data();
+          if (d.reversed || d.reversalStatus !== 'requested') throw new Error('This request was already handled.');
+          const accRef = fs.doc(db, 'accounts', d.learnerId);
+          const accSnap = await tx.get(accRef);
+          if (!accSnap.exists()) throw new Error('Account missing.');
+          tx.update(ref, { reversed: true, reversalStatus: 'approved', reversalReason: (d.reversalRequest || {}).reason || '', reversalApproval: { by: profile.uid, byName: profile.fullName || '', note, at: fs.serverTimestamp() }, updatedAt: fs.serverTimestamp() });
+          tx.update(accRef, { totalPaidCents: fs.increment(-d.amountCents), balanceCents: fs.increment(d.amountCents), updatedAt: fs.serverTimestamp() });
+          tx.set(fs.doc(db, 'financeSummary', `${d.campusId}_${d.termId}`), { campusId: d.campusId, termId: d.termId, collectedCents: fs.increment(-d.amountCents), updatedAt: fs.serverTimestamp() }, { merge: true });
+        });
+        await audit('payment.reversed', `payments/${id}`, { receipt: p.receiptNumber, amountCents: p.amountCents, note });
+        toast('Payment reversed and balance restored', 'success');
+      } else {
+        await fs.updateDoc(fs.doc(db, 'payments', id), { reversalStatus: 'rejected', reversalDecision: { by: profile.uid, byName: profile.fullName || '', note, at: fs.serverTimestamp() }, updatedAt: fs.serverTimestamp() });
+        await audit('payment.reversalDeclined', `payments/${id}`, { receipt: p.receiptNumber, note });
+        toast('Request declined', 'success');
+      }
+      loadRev();
+      if (!isHead) loadList();
+    } catch (e) { toast(e.message || 'Could not complete', 'error'); }
+  }
+
+  $('#revList').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.ap) decide(b.dataset.ap, true);
+    if (b.dataset.rj) decide(b.dataset.rj, false);
+  });
+
+  if (!isHead) {
+    $('#lDate').value = todayISO();
+    const multi = !campusScope(profile);
+    $('#lCampus').innerHTML = (multi ? '<option value="">All campuses</option>' : '') + opts(campuses, (c) => c.id, (c) => c.name, '');
+    if (!multi) $('#lCampusWrap').hidden = true;
+    $('#lDate').addEventListener('change', loadList);
+    $('#lCampus').addEventListener('change', loadList);
+    $('#lList').addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.dataset.rc) { const p = listRows.find((x) => x.id === b.dataset.rc); showReceipt(p, true); showTab('rec'); $('#payBox').hidden = true; }
+      if (b.dataset.rq) requestReversal(b.dataset.rq);
+    });
+    showTab('rec');
+    loadList();
+    const pre = new URLSearchParams(location.search).get('learner');
+    if (pre) {
+      try {
+        const s = await fs.getDoc(fs.doc(db, 'accounts', pre.toUpperCase()));
+        if (s.exists()) pick({ id: s.id, ...s.data() });
+      } catch (e) { console.error(e); }
+    }
+  } else {
+    showTab('rev');
+  }
+  loadRev();
+});
+</script>
+</body>
+</html>

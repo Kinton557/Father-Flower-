@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Overview · Head · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: head's overview: enrolment per campus, attendance today, fees collected (read-only), staff count, reports pending.
+// Role: head (admin allowed). Collections read: campuses, learners, attendance, payments, users, reports.
+import { requireRole } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, money, renderShell, setLoading } from '../shared/ui.js';
+import { HEAD_NAV } from './js/nav.js';
+const col = n => fs.collection(db, n), today = new Date().toISOString().slice(0, 10);
+async function count(...cs) { const q = fs.query(...cs); try { return (await fs.getCountFromServer(q)).data().count; } catch { return (await fs.getDocs(fs.query(q, fs.limit(1000)))).size; } }
+const card = (l, v) => `<div class="card" style="padding:16px"><div style="font-size:.85rem;color:var(--muted)">${esc(l)}</div><div style="font:700 1.8rem Playfair Display,Georgia,serif;color:var(--navy)">${esc(String(v))}</div></div>`;
+requireRole(['head', 'admin'], async me => {
+  const main = renderShell({ role: 'head', title: 'Overview', nav: HEAD_NAV }), all = me.campusId === 'all';
+  main.innerHTML = `<div id="s" style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))"></div><h2 style="margin:24px 0 8px">Enrolment by campus</h2><div id="c"></div>`;
+  const s = main.querySelector('#s'), c = main.querySelector('#c'); setLoading(s, true);
+  try {
+    const cw = all ? [] : [fs.where('campusId', '==', me.campusId)];
+    const [camps, learners, staff, drafts, att, pays] = await Promise.all([
+      fs.getDocs(fs.query(col('campuses'), ...(all ? [] : [fs.where(fs.documentId ? fs.documentId() : 'name', '==', me.campusId)]), fs.limit(50))),
+      count(col('learners'), fs.where('status', '==', 'active'), ...cw),
+      count(col('users'), fs.where('role', 'in', ['deputy', 'teacher', 'bursar', 'boarding', 'sdc']), fs.where('active', '==', true), ...cw),
+      count(col('reports'), fs.where('status', '==', 'draft')),
+      fs.getDocs(fs.query(col('attendance'), fs.where('date', '==', today), fs.limit(200))),
+      fs.getDocs(fs.query(col('payments'), fs.where('createdAt', '>=', fs.Timestamp.fromDate(new Date(today + 'T00:00:00'))), fs.limit(500)))]);
+    let p = 0, t = 0, paid = 0;
+    att.forEach(d => Object.values(d.data().records || {}).forEach(v => { t++; if (v !== 'absent') p++; }));
+    pays.forEach(d => { if (!d.data().reversed) paid += d.data().amountCents || 0; });
+    s.innerHTML = card('Active learners', learners) + card('Staff', staff) + card('Attendance today', t ? Math.round(p / t * 100) + '%' : 'No register yet') + card('Fees collected today', money(paid)) + card('Reports awaiting approval', drafts);
+    const rows = await Promise.all(camps.docs.map(async d => ({ n: d.data().name, k: await count(col('learners'), fs.where('campusId', '==', d.id), fs.where('status', '==', 'active')) })));
+    c.innerHTML = rows.length ? rows.map(r => `<div class="card" style="padding:12px 16px;margin-bottom:8px;display:flex;justify-content:space-between"><span>${esc(r.n)}</span><strong>${r.k}</strong></div>`).join('') : '<p>No campuses found.</p>';
+  } catch (e) { console.error(e); s.innerHTML = `<p role="alert" style="color:var(--danger)">Could not load the overview. Refresh and try again.</p>`; }
+  setLoading(s, false);
+});
+</script></body></html>

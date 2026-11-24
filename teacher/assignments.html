@@ -1,0 +1,61 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Assignments · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* teacher/assignments.html — create assignments, view/mark submissions, copy marks to term. Role: teacher (own), admin.
+   Collections: assignments, submissions, learners, assessments, marks */
+import { requireRole, audit } from '../shared/auth.js';
+import { renderShell, esc, toast, confirmBox, fmtDate, setLoading, saveFile } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, list, loadContext, copyToTerm } from './js/common.js';
+const { collection, doc, addDoc, updateDoc, serverTimestamp, where } = fs;
+requireRole(['teacher', 'admin'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'teacher', title: 'Assignments', nav: NAV });
+  try {
+    const ctx = await loadContext(p);
+    if (!ctx.term) { main.innerHTML = '<div class="tcard">No current term set.</div>'; return; }
+    main.innerHTML = `<div class="trow"><label>Class &amp; subject<select id="al"></select></label></div><form id="f" class="tcard" novalidate><h3>New assignment</h3><div class="trow"><label>Title<input id="t" maxlength="80"></label><label>Due date<input id="d" type="date"></label><label>Out of<input id="o" type="number" min="1" step="any"></label><label>Files (optional)<input id="fl" type="file" multiple></label></div><label style="display:block">Instructions<textarea id="in" class="tin" rows="3" style="width:100%"></textarea></label><button class="tbtn" id="go">Create</button></form><h2>Assignments</h2><div id="ls"></div><div id="rs"></div>`;
+    const $ = id => main.querySelector('#' + id), cur = () => ctx.allocations.find(a => a.id === $('al').value);
+    $('al').innerHTML = ctx.allocations.map(a => `<option value="${esc(a.id)}">${esc(ctx.label(a))}</option>`).join('') || '<option value="">No allocations</option>';
+    async function show() {
+      const a = cur(); $('rs').innerHTML = ''; if (!a) { $('ls').innerHTML = '<p class="muted">No allocation.</p>'; return; }
+      try {
+        const as = (await list('assignments', where('classId', '==', a.classId), where('subjectId', '==', a.subjectId), where('termId', '==', ctx.term.id))).sort((x, y) => (x.dueDate < y.dueDate ? 1 : -1));
+        $('ls').innerHTML = as.map(x => `<div class="tcard" style="margin-bottom:8px"><strong>${esc(x.title)}</strong> <span class="muted">due ${esc(fmtDate(x.dueDate))} · /${esc(x.outOf)}</span><div class="trow"><button class="tbtn" data-id="${esc(x.id)}">Submissions</button></div></div>`).join('') || '<p class="muted">No assignments yet.</p>';
+        $('ls').onclick = e => { const x = as.find(y => y.id === e.target.dataset.id); if (x) subs(x, a); };
+      } catch (e) { console.error(e); $('ls').innerHTML = '<p class="muted">Could not load.</p>'; }
+    }
+    async function subs(x, a) {
+      const box = $('rs'); box.innerHTML = '<p class="muted">Loading…</p>';
+      try {
+        const [ss, ls] = await Promise.all([list('submissions', where('assignmentId', '==', x.id)), list('learners', where('classId', '==', x.classId), where('status', '==', 'active'))]);
+        const sm = {}; ss.forEach(s => (sm[s.learnerId] = s)); ls.sort((m, n) => m.fullName.localeCompare(n.fullName));
+        box.innerHTML = `<div class="tcard"><h3>${esc(x.title)}: submissions (${ss.length}/${ls.length})</h3>${ls.map(l => { const s = sm[l.id]; return `<div class="tcard" style="margin:6px 0"><strong>${esc(l.fullName)}</strong> ${s ? '' : '<span class="pill">not submitted</span>'}${s ? `<p>${esc(s.text || '')}</p>${(s.files || []).map(f => `<a href="${esc(f)}" target="_blank" rel="noopener">File</a> `).join('')}<div class="trow" data-l="${esc(l.id)}"><label>Score /${esc(x.outOf)}<input class="sc" type="number" min="0" max="${esc(x.outOf)}" step="any" value="${esc(s.score ?? '')}"></label><label>Feedback<input class="fb" maxlength="300" value="${esc(s.feedback || '')}"></label><button class="tbtn alt sv">Save</button></div>` : ''}</div>`; }).join('')}<button class="tbtn" id="cp">Copy marks to term assessment</button></div>`;
+        box.onclick = async e => {
+          if (e.target.classList.contains('sv')) {
+            const r = e.target.closest('.trow'), v = r.querySelector('.sc').value; if (v === '' || !(Number(v) >= 0 && Number(v) <= x.outOf)) return toast(`Score must be 0 to ${x.outOf}.`, 'error');
+            try { await updateDoc(doc(db, 'submissions', x.id + '_' + r.dataset.l), { score: Number(v), feedback: r.querySelector('.fb').value.trim(), markedBy: p.uid, updatedAt: serverTimestamp() }); sm[r.dataset.l].score = Number(v); toast('Saved', 'success'); } catch (err) { console.error(err); toast('Could not save.', 'error'); }
+          }
+          if (e.target.id === 'cp') {
+            if (ctx.term.marksLocked) return toast('Marks are locked.', 'error');
+            const sc = {}; ss.filter(s => s.score != null).forEach(s => (sc[s.learnerId] = s.score)); if (!Object.keys(sc).length) return toast('Mark at least one submission first.', 'error');
+            if (!(await confirmBox('Create an assessment from these marks?'))) return;
+            try { const id = await copyToTerm({ classId: x.classId, subjectId: x.subjectId, termId: x.termId, allocationId: a.id, title: x.title, type: 'assignment', outOf: x.outOf, source: 'assignment', scores: sc, uid: p.uid }); await audit('assignment_to_marks', 'assessments/' + id, { assignmentId: x.id }); toast('Copied to term marks', 'success'); } catch (err) { console.error(err); toast('Copy failed.', 'error'); }
+          }
+        };
+      } catch (e) { console.error(e); box.innerHTML = '<p class="muted">Could not load submissions.</p>'; }
+    }
+    $('f').onsubmit = async e => {
+      e.preventDefault(); const a = cur(), t = $('t').value.trim(), o = Number($('o').value), d = $('d').value;
+      if (!a) return toast('Choose a class and subject.', 'error'); if (!t) return toast('Enter a title.', 'error'); if (!(o > 0)) return toast('"Out of" must be above 0.', 'error'); if (!d) return toast('Choose a due date.', 'error');
+      setLoading($('go'), true);
+      try {
+        const attachments = []; for (const f of $('fl').files) attachments.push((await saveFile(f, 'assignments')).url);
+        const ref = await addDoc(collection(db, 'assignments'), { classId: a.classId, subjectId: a.subjectId, termId: ctx.term.id, title: t, instructions: $('in').value.trim(), dueDate: d, outOf: o, attachments, createdAt: serverTimestamp(), createdBy: p.uid, updatedAt: serverTimestamp() });
+        await audit('create_assignment', 'assignments/' + ref.id, { title: t }); toast('Assignment created', 'success'); $('f').reset(); show();
+      } catch (err) { console.error(err); toast('Could not create it. Try again.', 'error'); }
+      setLoading($('go'), false);
+    };
+    $('al').onchange = show; show();
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load. Refresh and try again.</div>'; }
+});
+</script></body></html>

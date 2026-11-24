@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Staff attendance · Deputy · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: record teacher leave, absence and lateness, and lessons missed (lesson coverage). Role: deputy (admin allowed).
+// Collections: staffLeave (write), users (teachers, read).
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell, setLoading } from '../shared/ui.js';
+import { crud, loadRef } from '../admin/js/crud.js';
+import { DEPUTY_NAV } from './js/nav.js';
+A.requireRole(['deputy', 'admin'], async me => {
+  const main = renderShell({ role: 'deputy', title: 'Staff attendance', nav: DEPUTY_NAV }); const cw = me.campusId === 'all' ? [] : [fs.where('campusId', '==', me.campusId)];
+  const teachers = await loadRef('users', u => u.fullName, fs.where('role', '==', 'teacher'), ...cw).catch(e => { console.error(e); toast('Could not load teachers.', 'error'); return []; });
+  crud({ main, title: 'Teacher attendance and lessons covered', coll: 'staffLeave', me, defaults: { campusId: me.campusId }, refs: { staffUid: teachers },
+    fields: [['staffUid', 'Teacher', 'ref'], ['date', 'Date', 'date'], ['type', 'Type', 'select', ['absent', 'late', 'leave']], ['lessonsMissed', 'Lessons missed', 'number'], ['lessonsCovered', 'Lessons covered', 'number'], ['reason', 'Reason', 'text', null, 'optional']] });
+});
+</script></body></html>

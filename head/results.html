@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Results · Head · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: results analysis per class and subject for a term, with inline SVG bars and CSV export. Role: head (admin allowed).
+// Collections read: terms, classes, reports (first 500 for the term). Pass mark assumed 50 (average of the learner).
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell, setLoading } from '../shared/ui.js';
+import { HEAD_NAV } from './js/nav.js';
+const $ = id => document.getElementById(id), col = n => fs.collection(db, n), PASS = 50;
+const bars = rows => `<svg viewBox="0 0 320 ${rows.length * 26 + 4}" width="100%" role="img" aria-label="Average mark chart">${rows.map(([n, v], i) => `<text x="0" y="${i * 26 + 16}" font-size="11" fill="currentColor">${esc(n.slice(0, 14))}</text><rect x="95" y="${i * 26 + 4}" width="${Math.max(2, v * 2)}" height="16" rx="4" fill="var(--gold)"/><text x="${99 + v * 2}" y="${i * 26 + 16}" font-size="11" fill="currentColor">${v}</text>`).join('')}</svg>`;
+A.requireRole(['head', 'admin'], async me => {
+  const main = renderShell({ role: 'head', title: 'Results', nav: HEAD_NAV });
+  let terms = [], cls = {};
+  try { terms = (await fs.getDocs(fs.query(col('terms'), fs.limit(50)))).docs.map(d => ({ id: d.id, ...d.data() })); (await fs.getDocs(fs.query(col('classes'), fs.limit(300)))).forEach(d => cls[d.id] = d.data()); } catch (e) { console.error(e); }
+  main.innerHTML = `<div style="display:flex;gap:8px;margin-bottom:12px"><select id="t" aria-label="Term" style="min-height:44px">${terms.map(t => `<option value="${esc(t.id)}">${esc(t.year + ' Term ' + t.term)}</option>`).join('')}</select><button id="go" class="btn btn-primary" style="min-height:44px">Analyse</button><button id="csv" class="btn" style="min-height:44px" hidden>Export CSV</button></div><div id="out"></div>`;
+  let table = [];
+  $('go').onclick = async () => {
+    if (!$('t').value) return toast('Create a term under Academic first.', 'error'); setLoading($('out'), true);
+    try {
+      const reps = (await fs.getDocs(fs.query(col('reports'), fs.where('termId', '==', $('t').value), fs.limit(500)))).docs.map(d => d.data()).filter(r => me.campusId === 'all' || cls[r.classId]?.campusId === me.campusId);
+      if (!reps.length) { $('out').innerHTML = '<p>No reports for this term yet.</p>'; $('csv').hidden = true; setLoading($('out'), false); return; }
+      const by = {}, sub = {}; reps.forEach(r => { const c = (by[r.classId] ||= { n: 0, s: 0, p: 0 }); c.n++; c.s += r.average || 0; if ((r.average || 0) >= PASS) c.p++; (r.subjects || []).forEach(s => { const x = (sub[s.name] ||= { n: 0, s: 0 }); x.n++; x.s += s.total || 0; }); });
+      const cr = Object.entries(by).map(([k, c]) => [cls[k]?.name || k, +(c.s / c.n).toFixed(1), Math.round(c.p / c.n * 100), c.n]), sr = Object.entries(sub).map(([k, c]) => [k, +(c.s / c.n).toFixed(1)]);
+      table = [['Type', 'Name', 'Average', 'Pass %', 'Learners'], ...cr.map(r => ['Class', r[0], r[1], r[2], r[3]]), ...sr.map(r => ['Subject', r[0], r[1], '', ''])];
+      $('out').innerHTML = `<h2>By class</h2>${bars(cr.map(r => [r[0], r[1]]))}<p style="color:var(--muted)">Pass = learner average of ${PASS} or more: ${cr.map(r => esc(r[0]) + ' ' + r[2] + '%').join(' · ')}</p><h2>By subject</h2>${bars(sr)}`; $('csv').hidden = false;
+    } catch (e) { console.error(e); $('out').innerHTML = `<p role="alert" style="color:var(--danger)">Could not analyse results.</p>`; }
+    setLoading($('out'), false);
+  };
+  $('csv').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([table.map(r => r.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(',')).join('\n')], { type: 'text/csv' })); a.download = 'results.csv'; a.click(); };
+});
+</script></body></html>

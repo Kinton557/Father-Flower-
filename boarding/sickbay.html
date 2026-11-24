@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sick bay | Boarding</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * boarding/sickbay.html
+ * Purpose: sick bay records: complaint, treatment, medication schedule, who was told. Medical notes are private.
+ * Role allowed: boarding, admin (write); head (read only).
+ * Collections used: sickbay, learners (lookup).
+ */
+import { requireRole } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast } from '../shared/ui.js';
+import { crudPage } from '../bursar/js/crud.js';
+import { BOARDING_NAV, todayISO } from '../bursar/js/common.js';
+
+const parseMeds = (text) => String(text || '').split('\n').map((l) => l.trim()).filter(Boolean).map((line) => {
+  const p = line.split(/[,;]/).map((x) => x.trim());
+  if (!p[0]) throw new Error('Each medication line needs a name.');
+  if (p[3] && !/^\d{4}-\d{2}-\d{2}$/.test(p[3])) throw new Error(`The end date in "${line}" must look like 2026-12-05.`);
+  return { name: p[0], dose: p[1] || '', timesPerDay: p[2] || '', until: p[3] || '' };
+});
+
+const nav = (role) => (role === 'head' ? [{ label: 'Sick bay', href: 'sickbay.html', icon: 'heart' }, { label: 'Head home', href: '../head/index.html', icon: 'home' }] : BOARDING_NAV);
+
+crudPage({
+  roles: ['boarding', 'admin', 'head'],
+  nav,
+  title: 'Sick bay',
+  intro: 'Medical notes are visible to boarding staff, the head and admin only.',
+  collection: 'sickbay',
+  newLabel: 'Admit to sick bay',
+  empty: 'Nobody has been to the sick bay yet.',
+  canWrite: (p) => p.role !== 'head',
+  noDelete: true,
+  auditSave: true,
+  defaults: (p) => ({ status: 'admitted', admittedOn: todayISO(), attendedBy: p.fullName || '' }),
+  sort: (a, b) => (a.status === b.status ? (b.admittedOn || '').localeCompare(a.admittedOn || '') : a.status === 'admitted' ? -1 : 1),
+  fields: [
+    { key: 'learnerId', label: 'Learner reg number', type: 'learner', required: true, boarderOnly: true },
+    { key: 'complaint', label: 'Complaint', type: 'textarea', required: true, wide: true },
+    { key: 'treatment', label: 'Treatment given', type: 'textarea', wide: true },
+    { key: 'medications', label: 'Medication schedule. One per line: name, dose, times per day, last day (e.g. Paracetamol, 500mg, 3 times, 2026-12-05)', type: 'textarea', wide: true,
+      format: (v) => (Array.isArray(v) ? v.map((m) => [m.name, m.dose, m.timesPerDay, m.until].filter((x, i) => x || i < 1).join(', ')).join('\n') : ''), parse: parseMeds },
+    { key: 'notifiedParent', label: 'Parent or guardian has been told', type: 'checkbox' },
+    { key: 'notifiedWho', label: 'Who was told, how and when', type: 'text', max: 200, wide: true },
+    { key: 'attendedBy', label: 'Attended by', type: 'text', max: 100 },
+    { key: 'admittedOn', label: 'Date admitted', type: 'date', required: true },
+    { key: 'status', label: 'Status', type: 'select', options: [{ v: 'admitted', l: 'In sick bay' }, { v: 'discharged', l: 'Discharged' }] }
+  ],
+  columns: [
+    { label: 'Learner', html: (r) => `${esc(r.learnerName || '')}<br><small>${esc(r.learnerId)} ${esc(r.form || '')}</small>` },
+    { label: 'Complaint', html: (r) => esc(r.complaint || '') },
+    { label: 'Medication', html: (r) => ((r.medications || []).length ? esc(r.medications.map((m) => `${m.name} ${m.dose} ${m.timesPerDay}`.trim()).join('; ')) : 'None') },
+    { label: 'Parent told', html: (r) => (r.notifiedParent ? `Yes${r.notifiedWho ? ': ' + esc(r.notifiedWho) : ''}` : '<span class="b-tag warn">Not yet</span>') },
+    { label: 'Admitted', key: 'admittedOn', type: 'date' },
+    { label: 'Status', html: (r) => `<span class="b-tag ${r.status === 'admitted' ? 'warn' : 'ok'}">${r.status === 'admitted' ? 'In sick bay' : 'Discharged'}</span>` }
+  ],
+  rowActions: [
+    { label: 'Discharge', show: (r, p) => r.status === 'admitted' && p.role !== 'head',
+      run: async (r, { reload }) => { await fs.updateDoc(fs.doc(db, 'sickbay', r.id), { status: 'discharged', dischargedOn: todayISO(), updatedAt: fs.serverTimestamp() }); toast('Discharged', 'success'); reload(); } }
+  ],
+  summary: async (rows) => {
+    const inBay = rows.filter((r) => r.status === 'admitted');
+    const today = todayISO();
+    const meds = [];
+    inBay.forEach((r) => (r.medications || []).forEach((m) => { if (!m.until || m.until >= today) meds.push(`${esc(r.learnerName)}: ${esc(m.name)} ${esc(m.dose)} ${esc(m.timesPerDay)}`); }));
+    return `<div class="b-cards"><div class="b-card"><div class="k">In sick bay now</div><div class="v">${inBay.length}</div></div><div class="b-card"><div class="k">Parent not yet told</div><div class="v">${inBay.filter((r) => !r.notifiedParent).length}</div></div></div>
+      ${meds.length ? `<section class="b-panel"><h2 class="b-h2">Medication due today</h2><ul style="padding-left:18px;margin:0">${meds.map((m) => `<li>${m}</li>`).join('')}</ul></section>` : ''}`;
+  }
+});
+</script>
+</body>
+</html>

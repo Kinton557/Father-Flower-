@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Our Schools and Campuses | Father Flower Educational Network</title>
+<meta name="description" content="Find a Father Flower campus: primary and high schools with boarding and day options. Call, WhatsApp or get directions.">
+<meta name="theme-color" content="#13203F">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Father Flower campuses">
+<meta property="og:description" content="Find the campus nearest you and apply online.">
+<meta property="og:image" content="https://kinton557.github.io/Father-Flower-/assets/og.jpg">
+<link rel="icon" href="assets/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap">
+<link rel="stylesheet" href="css/site.css">
+</head>
+<body data-page="schools">
+<a class="skip" href="#main">Skip to content</a>
+<div id="site-header"></div>
+<main id="main">
+<section class="page-head"><div class="wrap"><p class="eyebrow">Our schools</p><h1>Find your campus</h1><p>Primary and high schools, with boarding and day options.</p></div></section>
+<section class="section">
+  <div class="wrap">
+    <div class="chips" role="group" aria-label="Filter by level">
+      <button class="chip" type="button" data-f="all" aria-pressed="true">All</button>
+      <button class="chip" type="button" data-f="primary" aria-pressed="false">Primary</button>
+      <button class="chip" type="button" data-f="secondary" aria-pressed="false">High school</button>
+      <button class="chip" type="button" data-f="boarding" aria-pressed="false">Boarding</button>
+    </div>
+    <div class="grid" id="campus-grid" aria-live="polite"></div>
+    <p class="muted small" style="margin-top:18px">Head office: <span id="ho-address"></span></p>
+  </div>
+</section>
+</main>
+<div id="site-footer"></div>
+<script type="module" src="js/site/schools.js"></script>
+</body>
+</html>

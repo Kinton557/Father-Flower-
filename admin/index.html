@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Overview · Admin · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: admin overview with live counts and quick actions. Role: admin.
+// Collections read: learners, users, campuses, attendance, payments, reports, admissions.
+import { requireRole } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, money, renderShell, setLoading } from '../shared/ui.js';
+import { ADMIN_NAV } from './js/nav.js';
+
+const STAFF = ['admin','head','deputy','sdc','bursar','boarding','teacher'];
+const today = new Date().toISOString().slice(0, 10);
+const col = n => fs.collection(db, n);
+// Count with the server aggregate when available, else a capped read.
+async function count(...cs) {
+  const q = fs.query(...cs);
+  try { return (await fs.getCountFromServer(q)).data().count; }
+  catch { return (await fs.getDocs(fs.query(q, fs.limit(1000)))).size; }
+}
+const card = (label, value, href) =>
+  `<a class="card stat" href="${href}" style="display:block;padding:16px;text-decoration:none;color:inherit"><div style="font-size:.85rem;color:var(--muted)">${esc(label)}</div><div style="font:700 1.9rem Playfair Display,Georgia,serif;color:var(--navy)">${esc(String(value))}</div></a>`;
+
+requireRole(['admin'], async () => {
+  const main = renderShell({ role: 'admin', title: 'Overview', nav: ADMIN_NAV });
+  main.innerHTML = `<div id="stats" class="grid" style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))"></div>
+  <h2 style="margin:24px 0 8px">Enrolment by campus</h2><div id="campus"></div>
+  <h2 style="margin:24px 0 8px">Quick actions</h2><div id="qa" style="display:flex;flex-wrap:wrap;gap:8px"></div>`;
+  const stats = main.querySelector('#stats'), campus = main.querySelector('#campus');
+  main.querySelector('#qa').innerHTML = [['Add user','users.html'],['Add learner','learners.html'],['Review applications','admissions.html'],['Approve reports','reports.html'],['Post news','website.html']]
+    .map(([t, h]) => `<a class="btn" style="min-height:44px;display:inline-flex;align-items:center;padding:0 16px;border-radius:var(--radius);background:var(--navy);color:var(--gold);text-decoration:none" href="${h}">${esc(t)}</a>`).join('');
+  setLoading(stats, true);
+  try {
+    const [learners, staff, drafts, apps, camps, att, pays] = await Promise.all([
+      count(col('learners'), fs.where('status', '==', 'active')),
+      count(col('users'), fs.where('role', 'in', STAFF), fs.where('active', '==', true)),
+      count(col('reports'), fs.where('status', '==', 'draft')),
+      count(col('admissions'), fs.where('status', '==', 'new')),
+      fs.getDocs(fs.query(col('campuses'), fs.limit(50))),
+      fs.getDocs(fs.query(col('attendance'), fs.where('date', '==', today), fs.limit(100))),
+      fs.getDocs(fs.query(col('payments'), fs.where('createdAt', '>=', fs.Timestamp.fromDate(new Date(today + 'T00:00:00'))), fs.limit(500)))
+    ]);
+    let present = 0, total = 0;
+    att.forEach(d => Object.values(d.data().records || {}).forEach(v => { total++; if (v !== 'absent') present++; }));
+    let paid = 0;
+    pays.forEach(d => { const p = d.data(); if (!p.reversed) paid += p.amountCents || 0; });
+    stats.innerHTML = [
+      card('Active learners', learners, 'learners.html'), card('Staff accounts', staff, 'users.html'),
+      card('Attendance today', total ? Math.round(present / total * 100) + '%' : 'No register yet', '#'),
+      card('Fees collected today', money(paid), '#'), card('Reports awaiting approval', drafts, 'reports.html'),
+      card('New applications', apps, 'admissions.html')].join('');
+    const rows = await Promise.all(camps.docs.map(async d => ({ n: d.data().name, c: await count(col('learners'), fs.where('campusId', '==', d.id), fs.where('status', '==', 'active')) })));
+    campus.innerHTML = rows.length
+      ? rows.map(r => `<div class="card" style="padding:12px 16px;margin-bottom:8px;display:flex;justify-content:space-between"><span>${esc(r.n)}</span><strong>${r.c}</strong></div>`).join('')
+      : `<p>No campuses yet. Add one under <a href="academic.html">Academic</a>, or run <a href="seed.html">Seed data</a>.</p>`;
+  } catch (e) {
+    console.error(e);
+    stats.innerHTML = `<p role="alert" style="color:var(--danger)">Could not load the overview. Check your connection and refresh.</p>`;
+  }
+  setLoading(stats, false);
+});
+</script></body></html>

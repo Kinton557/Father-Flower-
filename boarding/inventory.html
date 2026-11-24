@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Inventory | Boarding</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * boarding/inventory.html
+ * Purpose: hostel equipment: beds, mattresses, lockers and other items, with condition checks.
+ * Role allowed: boarding, admin.
+ * Collections used: hostelInventory, hostels (read).
+ */
+import { esc } from '../shared/ui.js';
+import { crudPage } from '../bursar/js/crud.js';
+import { BOARDING_NAV, loadHostels, bedsIn, todayISO } from '../bursar/js/common.js';
+
+const names = {};
+const COND =[{ v: 'good', l: 'Good' }, { v: 'fair', l: 'Fair' }, { v: 'poor', l: 'Poor' }, { v: 'damaged', l: 'Damaged' }];
+
+crudPage({
+  roles: ['boarding', 'admin'],
+  nav: BOARDING_NAV,
+  title: 'Hostel inventory',
+  collection: 'hostelInventory',
+  newLabel: 'Add item',
+  empty: 'No inventory recorded yet.',
+  auditSave: false,
+  sort: (a, b) => (a.hostelId || '').localeCompare(b.hostelId || '') || (a.item || '').localeCompare(b.item || ''),
+  fields: [
+    { key: 'hostelId', label: 'Hostel', type: 'select', required: true, options: async (p) => (await loadHostels(p)).map((h) => ({ v: h.id, l: h.name })) },
+    { key: 'item', label: 'Item (e.g. Beds, Mattresses, Lockers, Fans)', type: 'text', required: true, max: 80 },
+    { key: 'quantity', label: 'Quantity', type: 'number', required: true, min: 0, max: 100000 },
+    { key: 'condition', label: 'Condition', type: 'select', required: true, options: COND, default: 'good' },
+    { key: 'lastChecked', label: 'Last checked', type: 'date', today: true },
+    { key: 'notes', label: 'Notes', type: 'text', max: 200, wide: true }
+  ],
+  columns: [
+    { label: 'Hostel', html: (r) => esc(names[r.hostelId] || r.hostelId || '') }, { label: 'Item', key: 'item' }, { label: 'Qty', key: 'quantity' },
+    { label: 'Condition', html: (r) => `<span class="b-tag ${r.condition === 'good' ? 'ok' : r.condition === 'fair' ? '' : r.condition === 'poor' ? 'warn' : 'bad'}">${esc(r.condition || '')}</span>` },
+    { label: 'Checked', key: 'lastChecked', type: 'date' }, { label: 'Notes', html: (r) => esc(r.notes || '') }
+  ],
+  summary: async (rows, profile) => {
+    const hostels = await loadHostels(profile);
+    hostels.forEach((h) => { names[h.id] = h.name; });
+    const beds = hostels.reduce((s, h) => s + bedsIn(h), 0);
+    const mattresses = rows.filter((r) => /mattress/i.test(r.item)).reduce((s, r) => s + (r.quantity || 0), 0);
+    const bad = rows.filter((r) => ['poor', 'damaged'].includes(r.condition)).length;
+    return `<div class="b-cards"><div class="b-card"><div class="k">Beds in hostels</div><div class="v">${beds}</div></div><div class="b-card"><div class="k">Mattresses recorded</div><div class="v">${mattresses}</div>${mattresses < beds ? `<div class="n">${beds - mattresses} fewer than beds</div>` : ''}</div><div class="b-card"><div class="k">Needing repair</div><div class="v">${bad}</div><div class="n">Poor or damaged lines</div></div></div>`;
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reports | Bursar</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="./css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * bursar/reports.html
+ * Purpose: income, expenditure and debtors reports with CSV and print/PDF export.
+ * Role allowed: bursar, admin.
+ * Collections used: payments, expenditures, accounts, campuses (read only).
+ */
+import { requireRole } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, renderShell, fmtDate } from '../shared/ui.js';
+import { navFor, campusScope, loadCampuses, opts, usd, todayISO, tabs, printHTML, downloadCSV, getSchool, METHODS, FORMS, showErr } from './js/common.js';
+
+requireRole(['bursar', 'admin'], async (profile) => {
+  const main = renderShell({ role: profile.role, title: 'Reports', nav: navFor(profile.role) });
+  const first = todayISO().slice(0, 8) + '01';
+  main.innerHTML = `<div class="b-head"><h1>Reports</h1></div>
+    <div class="b-filters"><label id="cw">Campus<select id="campus"></select></label><label>From<input type="date" id="from" value="${first}"></label><label>To<input type="date" id="to" value="${todayISO()}"></label></div>
+    <div class="b-actions" style="margin:0 0 12px"><button class="b-btn" id="run" type="button">Run report</button></div>
+    <div class="b-tabs" role="tablist"><button data-tab="inc" type="button" role="tab">Income</button><button data-tab="exp" type="button" role="tab">Expenditure</button><button data-tab="debt" type="button" role="tab">Debtors</button></div>
+    <div data-panel="inc"></div><div data-panel="exp" hidden></div><div data-panel="debt" hidden></div>`;
+  const $ = (s) => main.querySelector(s);
+  let campuses = [], school = {};
+  try { [campuses, school] = await Promise.all([loadCampuses(profile), getSchool()]); } catch (e) { showErr($('[data-panel="inc"]'), e); return; }
+  const multi = !campusScope(profile);
+  $('#campus').innerHTML = (multi ? '<option value="">All campuses</option>' : '') + opts(campuses, (c) => c.id, (c) => c.name, '');
+  if (!multi) $('#cw').hidden = true;
+  const campusName = (id) => (campuses.find((c) => c.id === id) || {}).name || id || '';
+  const scopeTxt = () => (campusScope(profile) || $('#campus').value ? campusName(campusScope(profile) || $('#campus').value) : 'All campuses');
+  let active = 'inc';
+  const data = {};
+
+  const campusCons = () => { const c = campusScope(profile) || $('#campus').value; return c ? [fs.where('campusId', '==', c)] : []; };
+  const range = (field) => [fs.where(field, '>=', $('#from').value), fs.where(field, '<=', $('#to').value)];
+  const wrap = (title, body, csvName, csvRows) => `<div class="b-actions" style="margin:0 0 10px"><button class="b-btn b-ghost" data-csv type="button">Export CSV</button><button class="b-btn b-ghost" data-pr type="button">Print or save PDF</button></div><div data-rep>${body}</div>`;
+  const hook = (panel, title, csvName, csvRows) => {
+    panel.querySelector('[data-csv]').addEventListener('click', () => downloadCSV(csvName, csvRows));
+    panel.querySelector('[data-pr]').addEventListener('click', () => printHTML(`<div class="rc" style="max-width:none"><div class="rc-top"><strong>${esc(school.name || '')}</strong><div>${esc(scopeTxt())}</div></div><h2>${esc(title)}</h2><p class="rc-sm">${esc(fmtDate($('#from').value))} to ${esc(fmtDate($('#to').value))}</p>${panel.querySelector('[data-rep]').innerHTML.replaceAll('class="b-table', 'class="st-t b-table')}</div>`, 'a4'));
+  };
+  const table = (head, rows, foot) => `<div style="overflow-x:auto"><table class="b-table"><thead><tr>${head.map((h, i) => `<th${i ? ' class="b-num"' : ''}>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c, i) => `<td${i ? ' class="b-num"' : ''}>${c}</td>`).join('')}</tr>`).join('')}${foot ? `<tr>${foot.map((c, i) => `<th${i ? ' class="b-num"' : ''}>${c}</th>`).join('')}</tr>` : ''}</tbody></table></div>`;
+
+  async function income() {
+    const panel = $('[data-panel="inc"]');
+    panel.innerHTML = '<div class="b-skel"></div>';
+    const snap = await fs.getDocs(fs.query(fs.collection(db, 'payments'), ...campusCons(), ...range('paidOn'), fs.limit(3000)));
+    const all = snap.docs.map((d) => d.data());
+    const live = all.filter((p) => !p.reversed);
+    const sumBy = (key) => { const m = {}; live.forEach((p) => { const k = typeof key === 'function' ? key(p) : p[key]; m[k] = (m[k] || 0) + p.amountCents; }); return m; };
+    const byM = sumBy('method'), byD = sumBy('paidOn'), byF = sumBy((p) => p.form || 'Unknown'), byC = sumBy((p) => campusName(p.campusId));
+    const total = live.reduce((s, p) => s + p.amountCents, 0);
+    const reversed = all.filter((p) => p.reversed);
+    const body = `<div class="b-cards"><div class="b-card"><div class="k">Total income</div><div class="v">${usd(total)}</div><div class="n">${live.length} receipts</div></div><div class="b-card"><div class="k">Reversed</div><div class="v">${usd(reversed.reduce((s, p) => s + p.amountCents, 0))}</div><div class="n">${reversed.length} receipts</div></div></div>
+      ${snap.size >= 3000 ? '<p class="b-alert">Only the first 3000 receipts are included. Narrow the dates.</p>' : ''}
+      <h3 class="b-h2">By method</h3>${table(['Method', 'Amount'], Object.keys(METHODS).map((m) => [esc(METHODS[m]), usd(byM[m] || 0)]), ['Total', usd(total)])}
+      <h3 class="b-h2" style="margin-top:16px">By campus</h3>${table(['Campus', 'Amount'], Object.entries(byC).map(([k, v]) => [esc(k), usd(v)]))}
+      <h3 class="b-h2" style="margin-top:16px">By form</h3>${table(['Form', 'Amount'], Object.entries(byF).sort((a, b) => FORMS.indexOf(a[0]) - FORMS.indexOf(b[0])).map(([k, v]) => [esc(k), usd(v)]))}
+      <h3 class="b-h2" style="margin-top:16px">By day</h3>${table(['Date', 'Amount'], Object.entries(byD).sort().map(([k, v]) => [esc(fmtDate(k)), usd(v)]))}`;
+    panel.innerHTML = wrap('Income', body);
+    hook(panel, 'Income report', `income-${$('#from').value}-to-${$('#to').value}.csv`, [['Receipt', 'Date', 'Reg number', 'Learner', 'Form', 'Campus', 'Method', 'Reference', 'Amount', 'Reversed'], ...all.map((p) => [p.receiptNumber, p.paidOn, p.regNumber, p.learnerName, p.form, campusName(p.campusId), p.method, p.reference || '', (p.amountCents / 100).toFixed(2), p.reversed ? 'Yes' : 'No'])]);
+  }
+  async function expenditure() {
+    const panel = $('[data-panel="exp"]');
+    panel.innerHTML = '<div class="b-skel"></div>';
+    const snap = await fs.getDocs(fs.query(fs.collection(db, 'expenditures'), ...campusCons(), ...range('date'), fs.limit(3000)));
+    const all = snap.docs.map((d) => d.data());
+    const paid = all.filter((e) => e.status === 'paid');
+    const byC = {}; paid.forEach((e) => { byC[e.category] = (byC[e.category] || 0) + e.amountCents; });
+    const total = paid.reduce((s, e) => s + e.amountCents, 0);
+    const pending = all.filter((e) => e.status !== 'paid').reduce((s, e) => s + e.amountCents, 0);
+    const body = `<div class="b-cards"><div class="b-card"><div class="k">Paid out</div><div class="v">${usd(total)}</div></div><div class="b-card"><div class="k">Not yet paid</div><div class="v">${usd(pending)}</div></div></div>
+      <h3 class="b-h2">Paid, by category</h3>${table(['Category', 'Amount'], Object.entries(byC).sort((a, b) => b[1] - a[1]).map(([k, v]) => [esc(k), usd(v)]), ['Total', usd(total)])}`;
+    panel.innerHTML = wrap('Expenditure', body);
+    hook(panel, 'Expenditure report', `expenditure-${$('#from').value}-to-${$('#to').value}.csv`, [['Voucher', 'Date', 'Payee', 'Category', 'Description', 'Amount', 'Status'], ...all.map((e) => [e.voucherNumber, e.date, e.supplierName, e.category, e.description, (e.amountCents / 100).toFixed(2), e.status])]);
+  }
+  async function debtors() {
+    const panel = $('[data-panel="debt"]');
+    panel.innerHTML = '<div class="b-skel"></div>';
+    const snap = await fs.getDocs(fs.query(fs.collection(db, 'accounts'), ...campusCons(), fs.limit(2000)));
+    const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((a) => a.balanceCents > 0);
+    const byF = {}; rows.forEach((a) => { const k = a.form || 'Unknown'; byF[k] = byF[k] || { n: 0, v: 0 }; byF[k].n++; byF[k].v += a.balanceCents; });
+    const total = rows.reduce((s, a) => s + a.balanceCents, 0);
+    const body = `<div class="b-cards"><div class="b-card"><div class="k">Total owing</div><div class="v">${usd(total)}</div></div><div class="b-card"><div class="k">Debtors</div><div class="v">${rows.length}</div></div></div>
+      <p class="b-sub">The debtors report shows balances as at today. The date range does not apply.</p>
+      ${table(['Form', 'Debtors', 'Owing'], Object.entries(byF).sort((a, b) => FORMS.indexOf(a[0]) - FORMS.indexOf(b[0])).map(([k, v]) => [esc(k), String(v.n), usd(v.v)]), ['Total', String(rows.length), usd(total)])}
+      <h3 class="b-h2" style="margin-top:16px">Top 20 balances</h3>${table(['Learner', 'Form', 'Balance'], rows.sort((a, b) => b.balanceCents - a.balanceCents).slice(0, 20).map((a) => [esc(`${a.learnerName} (${a.regNumber || a.id})`), esc(a.form || ''), usd(a.balanceCents)]))}`;
+    panel.innerHTML = wrap('Debtors', body);
+    hook(panel, 'Debtors report', `debtors-${todayISO()}.csv`, [['Reg number', 'Learner', 'Form', 'Campus', 'Balance'], ...rows.map((a) => [a.regNumber || a.id, a.learnerName, a.form, campusName(a.campusId), (a.balanceCents / 100).toFixed(2)])]);
+  }
+  const runners = { inc: income, exp: expenditure, debt: debtors };
+  async function run() {
+    if ($('#from').value > $('#to').value) { $(`[data-panel="${active}"]`).innerHTML = '<p class="b-err">The start date is after the end date.</p>'; return; }
+    try { await runners[active](); } catch (e) { showErr($(`[data-panel="${active}"]`), e); }
+  }
+  const show = tabs(main, (n) => { active = n; run(); });
+  $('#run').addEventListener('click', run);
+  show('inc');
+});
+</script>
+</body>
+</html>

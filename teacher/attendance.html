@@ -1,0 +1,54 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Class register · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* teacher/attendance.html — purpose: take the class register. Role: teacher (class teacher or allocated), admin.
+   Collections: attendance/{classId_date}, classes, learners, allocations */
+import { requireRole } from '../shared/auth.js';
+import { renderShell, esc, toast, setLoading } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, list, loadContext } from './js/common.js';
+const { doc, getDoc, setDoc, serverTimestamp, where } = fs;
+requireRole(['teacher', 'admin'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'teacher', title: 'Class register', nav: NAV });
+  try {
+    const ctx = await loadContext(p);
+    const own = p.role === 'admin' ? await list('classes') : await list('classes', where('classTeacherUid', '==', p.uid));
+    const map = {}; own.forEach(c => (map[c.id] = c.name)); Object.entries(ctx.classes).forEach(([id, c]) => (map[id] = c.name));
+    const ids = Object.keys(map);
+    if (!ids.length) { main.innerHTML = '<div class="tcard">No classes found for you.</div>'; return; }
+    const today = new Date().toISOString().slice(0, 10);
+    main.innerHTML = `<div class="trow"><label>Class<select id="c">${ids.map(i => `<option value="${esc(i)}">${esc(map[i])}</option>`).join('')}</select></label><label>Date<input id="d" type="date" value="${today}" max="${today}"></label><button class="tbtn alt" id="all">All present</button></div><div id="g"></div>`;
+    const $ = id => main.querySelector('#' + id);
+    let existing = null;
+    async function show() {
+      $('g').innerHTML = '<p class="muted">Loading…</p>';
+      try {
+        const cid = $('c').value, date = $('d').value;
+        const [ls, ex] = await Promise.all([list('learners', where('classId', '==', cid), where('status', '==', 'active')), getDoc(doc(db, 'attendance', cid + '_' + date))]);
+        existing = ex.exists() ? ex.data() : null; const rec = existing ? existing.records || {} : {};
+        ls.sort((a, b) => a.fullName.localeCompare(b.fullName));
+        $('g').innerHTML = ls.map(l => `<div class="tcard" style="margin-bottom:6px;display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap"><span>${esc(l.fullName)}</span>
+          <select class="tin st" data-id="${esc(l.id)}" aria-label="Status for ${esc(l.fullName)}">${['present', 'absent', 'late'].map(s => `<option value="${s}" ${(rec[l.id] || 'present') === s ? 'selected' : ''}>${s[0].toUpperCase() + s.slice(1)}</option>`).join('')}</select></div>`).join('')
+          + (ls.length ? '<button class="tbtn" id="sv">Save register</button>' : '<p class="muted">No active learners in this class.</p>');
+        const sv = $('sv'); if (!sv) return;
+        sv.onclick = async () => {
+          if ($('d').value > today) return toast('You cannot take a register for a future date.', 'error');
+          const records = {}; main.querySelectorAll('.st').forEach(s => (records[s.dataset.id] = s.value));
+          setLoading(sv, true);
+          try {
+            const d = { classId: cid, date, records, takenBy: p.uid, updatedAt: serverTimestamp() };
+            if (!existing) { d.createdAt = serverTimestamp(); d.createdBy = p.uid; }
+            await setDoc(doc(db, 'attendance', cid + '_' + date), d, { merge: true });
+            toast('Register saved', 'success'); existing = d;
+          } catch (e) { console.error(e); toast('Save failed. Try again.', 'error'); }
+          setLoading(sv, false);
+        };
+      } catch (e) { console.error(e); $('g').innerHTML = '<p class="muted">Could not load the register.</p>'; }
+    }
+    $('c').onchange = show; $('d').onchange = show;
+    $('all').onclick = () => main.querySelectorAll('.st').forEach(s => (s.value = 'present'));
+    show();
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load. Refresh and try again.</div>'; }
+});
+</script></body></html>

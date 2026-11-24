@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hostels and beds | Boarding</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="../bursar/css/bursar.css">
+<style>
+.bedgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px}
+.bed{min-height:56px;text-align:left;padding:6px 10px;border-radius:10px;border:1px solid var(--b-line);background:var(--b-surface);color:var(--b-text);font:inherit;font-size:.8rem;cursor:pointer}
+.bed.free{border-style:dashed}
+.bed[aria-pressed="true"]{outline:3px solid var(--gold,#C9A24A)}
+.bed small{display:block;color:var(--b-muted)}
+</style>
+</head>
+<body>
+<script type="module">
+/*
+ * boarding/hostels.html
+ * Purpose: hostels, rooms and beds; allocate, move and swap boarders.
+ * Role allowed: boarding, admin.
+ * Collections used: hostels (write), learners (boarders: hostelId and bedId only).
+ */
+import { requireRole, audit } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, confirmBox, renderShell } from '../shared/ui.js';
+import { mountCrud } from '../bursar/js/crud.js';
+import { BOARDING_NAV, loadBoarders, loadHostels, bedsIn, tabs, showErr } from '../bursar/js/common.js';
+
+const parseRooms = (text) => {
+  const rooms = [];
+  for (const line of String(text || '').split('\n').map((l) => l.trim()).filter(Boolean)) {
+    const m = line.match(/^(.+?)\s*[,;]\s*(\d{1,2})$/);
+    if (!m) throw new Error(`Room line "${line}" must look like: Room 1, 6`);
+    const beds = Number(m[2]);
+    if (beds < 1 || beds > 40) throw new Error('Beds per room must be between 1 and 40.');
+    if (rooms.some((r) => r.name.toLowerCase() === m[1].toLowerCase())) throw new Error(`Room "${m[1]}" is listed twice.`);
+    rooms.push({ name: m[1], beds });
+  }
+  if (!rooms.length) throw new Error('Add at least one room.');
+  return rooms;
+};
+const bedId = (room, n) => `${room}-${n}`;
+const genderKey = (g) => String(g || '').trim().toLowerCase().charAt(0);
+
+requireRole(['boarding', 'admin'], async (profile) => {
+  const main = renderShell({ role: profile.role, title: 'Hostels and beds', nav: BOARDING_NAV });
+  main.innerHTML = `<div class="b-head"><h1>Hostels and beds</h1></div>
+    <div class="b-tabs" role="tablist"><button data-tab="beds" type="button" role="tab">Beds and allocation</button><button data-tab="hostels" type="button" role="tab">Hostels and rooms</button></div>
+    <div data-panel="beds"><div class="b-load">Loading...</div></div><div data-panel="hostels" hidden></div>`;
+  const $ = (s) => main.querySelector(s);
+  let hostelsMounted = false;
+  const show = tabs(main, (n) => {
+    if (n === 'hostels' && !hostelsMounted) {
+      hostelsMounted = true;
+      mountCrud($('[data-panel="hostels"]'), {
+        collection: 'hostels', newLabel: 'Add hostel', empty: 'No hostels yet.', auditSave: true,
+        sort: (a, b) => (a.name || '').localeCompare(b.name || ''),
+        afterSave: () => loadBeds(),
+        fields: [
+          { key: 'name', label: 'Hostel name', type: 'text', required: true, max: 80 },
+          { key: 'gender', label: 'Gender', type: 'select', required: true, options: [{ v: 'male', l: 'Boys' }, { v: 'female', l: 'Girls' }, { v: 'mixed', l: 'Mixed' }] },
+          { key: 'rooms', label: 'Rooms. One per line: room name, number of beds (e.g. Room 1, 6)', type: 'textarea', required: true, wide: true,
+            format: (v) => (Array.isArray(v) ? v.map((r) => `${r.name}, ${r.beds}`).join('\n') : ''), parse: parseRooms }
+        ],
+        columns: [
+          { label: 'Hostel', key: 'name' }, { label: 'For', key: 'gender', type: 'select', options: [{ v: 'male', l: 'Boys' }, { v: 'female', l: 'Girls' }, { v: 'mixed', l: 'Mixed' }] },
+          { label: 'Rooms', html: (r) => String((r.rooms || []).length) }, { label: 'Beds', html: (r) => String(bedsIn(r)) }
+        ]
+      }, profile).catch((e) => showErr($('[data-panel="hostels"]'), e));
+    }
+  });
+  show('beds');
+
+  let hostels = [], boarders = [], selHostel = '', sel = null; // sel = {type:'learner'|'bed', id}
+  const panel = $('[data-panel="beds"]');
+
+  async function loadBeds() {
+    panel.innerHTML = '<div class="b-skel"></div>';
+    try {
+      [hostels, boarders] = await Promise.all([loadHostels(profile), loadBoarders(profile)]);
+      if (!hostels.length) { panel.innerHTML = '<div class="b-empty">No hostels yet. Open the "Hostels and rooms" tab and add one.</div>'; return; }
+      if (!hostels.find((h) => h.id === selHostel)) selHostel = hostels[0].id;
+      sel = null;
+      draw();
+    } catch (e) { showErr(panel, e); }
+  }
+
+  function draw() {
+    const h = hostels.find((x) => x.id === selHostel);
+    const inHostel = boarders.filter((l) => l.hostelId === h.id);
+    const byBed = new Map(inHostel.map((l) => [l.bedId, l]));
+    const unalloc = boarders.filter((l) => !l.hostelId || !l.bedId).sort((a, b) => (a.fullName || '').localeCompare(b.fullName || ''));
+    const total = bedsIn(h);
+    const selLearner = sel && sel.type === 'learner' ? boarders.find((l) => l.id === sel.id) : null;
+    const selBedLearner = sel && sel.type === 'bed' ? byBed.get(sel.id) : null;
+    panel.innerHTML = `
+      <div class="b-filters"><label>Hostel<select id="hsel">${hostels.map((x) => `<option value="${esc(x.id)}"${x.id === h.id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select></label></div>
+      <div class="b-cards"><div class="b-card"><div class="k">Beds</div><div class="v">${total}</div></div><div class="b-card"><div class="k">Occupied</div><div class="v">${inHostel.length}</div></div><div class="b-card"><div class="k">Vacant</div><div class="v">${Math.max(0, total - inHostel.length)}</div></div></div>
+      <p class="b-sub" id="hint">${selLearner ? `Selected ${esc(selLearner.fullName)}. Now tap a free bed.` : selBedLearner ? `Selected ${esc(selBedLearner.fullName)}. Tap a free bed to move, or another occupied bed to swap.` : 'To allocate: tap a learner in the list, then a free bed. To move or swap: tap an occupied bed first.'}</p>
+      ${selBedLearner ? '<div class="b-actions" style="margin:0 0 12px"><button class="b-btn b-ghost" id="unalloc" type="button">Remove from bed</button><button class="b-btn b-ghost" id="clr" type="button">Clear selection</button></div>' : (sel ? '<div class="b-actions" style="margin:0 0 12px"><button class="b-btn b-ghost" id="clr" type="button">Clear selection</button></div>' : '')}
+      <div class="b-panel"><h2 class="b-h2">Unallocated boarders (${unalloc.length})</h2>
+        ${unalloc.length ? `<div class="b-seg">${unalloc.slice(0, 120).map((l) => `<button type="button" data-l="${esc(l.id)}" aria-pressed="${selLearner && selLearner.id === l.id}">${esc(l.fullName)} <small>${esc(l.form || '')}</small></button>`).join('')}</div>` : '<span class="b-sub">Every boarder has a bed.</span>'}</div>
+      ${(h.rooms || []).map((r) => `<div class="b-panel"><h3 class="b-h2">${esc(r.name)}</h3><div class="bedgrid">${Array.from({ length: Number(r.beds) || 0 }, (_, i) => { const id = bedId(r.name, i + 1); const l = byBed.get(id); return `<button type="button" class="bed ${l ? '' : 'free'}" data-b="${esc(id)}" aria-pressed="${!!(sel && sel.type === 'bed' && sel.id === id)}">Bed ${i + 1}<small>${l ? esc(l.fullName) : 'Free'}</small></button>`; }).join('')}</div></div>`).join('')}`;
+    panel.querySelector('#hsel').addEventListener('change', (e) => { selHostel = e.target.value; sel = null; draw(); });
+    const clr = panel.querySelector('#clr'); if (clr) clr.addEventListener('click', () => { sel = null; draw(); });
+    const un = panel.querySelector('#unalloc');
+    if (un) un.addEventListener('click', async () => {
+      if (!(await confirmBox(`Remove ${selBedLearner.fullName} from this bed?`))) return;
+      await write([[selBedLearner.id, '', '']], 'bed.removed', selBedLearner.id);
+    });
+    panel.querySelectorAll('[data-l]').forEach((b) => b.addEventListener('click', () => { sel = { type: 'learner', id: b.dataset.l }; draw(); }));
+    panel.querySelectorAll('[data-b]').forEach((b) => b.addEventListener('click', () => onBed(h, byBed, b.dataset.b)));
+  }
+
+  async function write(changes, action, target) {
+    try {
+      const b = fs.writeBatch(db);
+      changes.forEach(([id, hostelId, bId]) => b.update(fs.doc(db, 'learners', id), { hostelId, bedId: bId, updatedAt: fs.serverTimestamp() }));
+      await b.commit();
+      await audit(action, `learners/${target}`, { changes: changes.map(([id, hid, bd]) => `${id}:${hid}:${bd}`) });
+      toast('Saved', 'success');
+      await loadBeds();
+    } catch (e) { toast('Could not save: ' + (e.message || ''), 'error'); }
+  }
+
+  async function onBed(h, byBed, id) {
+    const occupant = byBed.get(id);
+    if (!sel) { if (occupant) { sel = { type: 'bed', id }; draw(); } else toast('Tap a learner first, then a free bed.', 'info'); return; }
+    if (sel.type === 'learner') {
+      if (occupant) { toast('That bed is taken. Pick a free bed.', 'error'); return; }
+      const l = boarders.find((x) => x.id === sel.id);
+      if (!(await genderOk(l, h))) return;
+      await write([[l.id, h.id, id]], 'bed.allocated', l.id);
+      return;
+    }
+    const from = byBed.get(sel.id);
+    if (sel.id === id) { sel = null; draw(); return; }
+    if (!occupant) { if (!(await genderOk(from, h))) return; await write([[from.id, h.id, id]], 'bed.moved', from.id); return; }
+    if (!(await confirmBox(`Swap ${from.fullName} and ${occupant.fullName}?`))) return;
+    await write([[from.id, h.id, id], [occupant.id, h.id, sel.id]], 'bed.swapped', from.id);
+  }
+
+  async function genderOk(l, h) {
+    if (h.gender === 'mixed' || !h.gender) return true;
+    const g = genderKey(l.gender);
+    if (g && g !== genderKey(h.gender)) return confirmBox(`${l.fullName} is not in the gender this hostel is for. Allocate anyway?`);
+    return true;
+  }
+
+  loadBeds();
+});
+</script>
+</body>
+</html>

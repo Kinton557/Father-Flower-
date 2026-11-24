@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Learner accounts | Bursar</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="./css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * bursar/accounts.html
+ * Purpose: learner finance accounts, statements (print/PDF), manual charges, and bulk "open accounts and apply fees".
+ * Role allowed: bursar, admin.
+ * Collections used: accounts, accounts/{id}/charges, learners, feeStructures, payments, financeSummary, campuses, terms, auditLog.
+ */
+import { requireRole, audit } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, confirmBox, renderShell, fmtDate } from '../shared/ui.js';
+import { navFor, searchAccounts, campusScope, scopeWhere, loadCampuses, loadTerms, getSchool, pickCurrentTerm, termLabel, opts, toCents, usd, normForm, todayISO, tabs, printHTML, tsMillis, showErr } from './js/common.js';
+
+requireRole(['bursar', 'admin'], async (profile) => {
+  const main = renderShell({ role: profile.role, title: 'Accounts', nav: navFor(profile.role) });
+  main.innerHTML = `
+    <div class="b-head"><h1>Learner accounts</h1></div>
+    <div class="b-tabs" role="tablist"><button data-tab="list" type="button" role="tab" aria-selected="true">Accounts</button><button data-tab="apply" type="button" role="tab" aria-selected="false">Open accounts and apply fees</button></div>
+    <div data-panel="list">
+      <section id="stmt" class="b-panel" hidden></section>
+      <div class="b-filters">
+        <label id="campusWrap">Campus<select id="fCampus"></select></label>
+        <label>Search by reg number or name<input id="q" type="search" placeholder="e.g. J0016 or Tendai" autocomplete="off"></label>
+        <label>Balance<select id="fBal"><option value="">All</option><option value="owing">Owing</option><option value="credit">In credit</option><option value="clear">Cleared</option></select></label>
+      </div>
+      <div class="b-actions" style="margin:0 0 12px"><button class="b-btn" id="go" type="button">Search</button></div>
+      <div id="list"><div class="b-skel"></div></div>
+    </div>
+    <div data-panel="apply" hidden>
+      <section class="b-panel">
+        <p class="b-sub">This creates a finance account and a finance registration number for every active learner in the campus, then adds the term fees from the fee structure (boarders also get the boarding items). Running it twice never bills a learner twice for the same term.</p>
+        <div class="b-form">
+          <label>Campus<select id="aCampus"></select></label>
+          <label>Term<select id="aTerm"></select></label>
+        </div>
+        <div class="b-actions"><button class="b-btn" id="previewBtn" type="button">Preview</button></div>
+        <div id="preview" style="margin-top:14px"></div>
+      </section>
+    </div>`;
+  const $ = (s) => main.querySelector(s);
+  const list = $('#list');
+  const showTab = tabs(main);
+  showTab('list');
+
+  let campuses = [], terms = [], school = {};
+  try {
+    [campuses, terms, school] = await Promise.all([loadCampuses(profile), loadTerms(), getSchool()]);
+  } catch (e) { showErr(list, e); return; }
+  const multi = !campusScope(profile);
+  $('#fCampus').innerHTML = (multi ? '<option value="">All campuses</option>' : '') + opts(campuses, (c) => c.id, (c) => c.name, '');
+  if (!multi) $('#campusWrap').hidden = true;
+  $('#aCampus').innerHTML = opts(campuses, (c) => c.id, (c) => c.name, '');
+  const cur = pickCurrentTerm(terms, school);
+  $('#aTerm').innerHTML = opts(terms, (t) => t.id, termLabel, cur ? cur.id : '');
+  const campusName = (id) => (campuses.find((c) => c.id === id) || {}).name || id || '';
+
+  /* ---------- accounts list ---------- */
+  let rows = [];
+  async function search() {
+    list.innerHTML = '<div class="b-skel"></div>';
+    try {
+      const q = $('#q').value.trim();
+      const cid = $('#fCampus').value;
+      if (q) {
+        rows = await searchAccounts(profile, q);
+      } else {
+        const cons = cid ? [fs.where('campusId', '==', cid)] : scopeWhere(profile);
+        const snap = await fs.getDocs(fs.query(fs.collection(db, 'accounts'), ...cons, fs.limit(50)));
+        rows = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      }
+      const sc = campusScope(profile);
+      if (sc) rows = rows.filter((r) => r.campusId === sc);
+      else if (cid) rows = rows.filter((r) => r.campusId === cid);
+      const b = $('#fBal').value;
+      if (b === 'owing') rows = rows.filter((r) => r.balanceCents > 0);
+      if (b === 'credit') rows = rows.filter((r) => r.balanceCents < 0);
+      if (b === 'clear') rows = rows.filter((r) => !r.balanceCents);
+      rows.sort((a, b2) => (a.learnerName || '').localeCompare(b2.learnerName || ''));
+      renderList();
+    } catch (e) { showErr(list, e); }
+  }
+  function renderList() {
+    if (!rows.length) { list.innerHTML = '<div class="b-empty">No accounts found. Use "Open accounts and apply fees" to create them for a campus.</div>'; return; }
+    list.innerHTML = `<table class="b-table stack"><thead><tr><th>Reg number</th><th>Learner</th><th>Form</th><th class="b-num">Due</th><th class="b-num">Paid</th><th class="b-num">Balance</th><th></th></tr></thead><tbody>
+      ${rows.map((r) => `<tr>
+        <td data-label="Reg number">${esc(r.regNumber || r.id)}<br><small>${esc(r.financeRegNumber || '')}</small></td>
+        <td data-label="Learner">${esc(r.learnerName || '')}</td>
+        <td data-label="Form">${esc(r.form || '')}</td>
+        <td data-label="Due" class="b-num">${usd(r.totalDueCents)}</td>
+        <td data-label="Paid" class="b-num">${usd(r.totalPaidCents)}</td>
+        <td data-label="Balance" class="b-num ${r.balanceCents > 0 ? 'b-pos' : (r.balanceCents < 0 ? 'b-neg' : '')}">${usd(r.balanceCents)}</td>
+        <td><button class="b-btn b-ghost" data-stmt="${esc(r.id)}" type="button">Statement</button></td></tr>`).join('')}</tbody></table>`;
+  }
+  list.addEventListener('click', (e) => { const b = e.target.closest('[data-stmt]'); if (b) openStatement(b.dataset.stmt); });
+  $('#go').addEventListener('click', search);
+  $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter') search(); });
+  $('#fCampus').addEventListener('change', search);
+  $('#fBal').addEventListener('change', search);
+
+  /* ---------- statement ---------- */
+  const stmt = $('#stmt');
+  async function openStatement(id) {
+    stmt.hidden = false;
+    stmt.innerHTML = '<div class="b-skel"></div>';
+    stmt.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    try {
+      const [accS, chS, payS] = await Promise.all([
+        fs.getDoc(fs.doc(db, 'accounts', id)),
+        fs.getDocs(fs.query(fs.collection(db, 'accounts', id, 'charges'), fs.limit(200))),
+        fs.getDocs(fs.query(fs.collection(db, 'payments'), fs.where('learnerId', '==', id), fs.limit(200)))
+      ]);
+      if (!accS.exists()) throw new Error('Account not found.');
+      const a = { id, ...accS.data() };
+      const entries = [];
+      chS.docs.forEach((d) => { const c = d.data(); entries.push({ date: c.date || '', ms: tsMillis(c.createdAt), desc: c.description || 'Charge', charge: c.amountCents || 0, pay: 0, ref: '', note: '' }); });
+      payS.docs.forEach((d) => { const p = d.data(); entries.push({ date: p.paidOn || '', ms: tsMillis(p.createdAt), desc: `Payment ${p.receiptNumber || ''} (${p.method || ''})`, charge: 0, pay: p.reversed ? 0 : (p.amountCents || 0), ref: p.reference || '', note: p.reversed ? 'Reversed' : '' }); });
+      entries.sort((x, y) => (x.date || '').localeCompare(y.date || '') || x.ms - y.ms);
+      let bal = 0;
+      entries.forEach((e) => { bal += e.charge - e.pay; e.bal = bal; });
+      const mismatch = entries.length && bal !== (a.balanceCents || 0);
+      const body = entries.length ? entries.map((e) => `<tr><td>${esc(fmtDate(e.date))}</td><td>${esc(e.desc)}${e.note ? ' (' + esc(e.note) + ')' : ''}</td><td>${esc(e.ref)}</td><td class="r">${e.charge ? usd(e.charge) : ''}</td><td class="r">${e.pay ? usd(e.pay) : ''}</td><td class="r">${usd(e.bal)}</td></tr>`).join('') : '<tr><td colspan="6">No entries yet.</td></tr>';
+      const printable = `<div class="rc"><div class="rc-top"><strong>${esc(school.name || 'Father Flower Educational Network')}</strong><div>${esc(campusName(a.campusId))}</div><div class="rc-sm">${esc(school.address || '')}</div></div>
+        <h2>Fees statement</h2><p class="rc-sm">${esc(a.learnerName)} | Reg ${esc(a.regNumber || a.id)} | ${esc(a.form || '')} | Finance no ${esc(a.financeRegNumber || '')}<br>Printed ${esc(fmtDate(todayISO()))}</p>
+        <table class="st-t"><thead><tr><th>Date</th><th>Description</th><th>Reference</th><th class="r">Charges</th><th class="r">Payments</th><th class="r">Balance</th></tr></thead><tbody>${body}</tbody></table>
+        <div class="rc-amt"><span>Balance owing</span><strong>${usd(a.balanceCents)}</strong></div></div>`;
+      stmt.innerHTML = `<div class="b-head"><h2 class="b-h2" style="margin:0">${esc(a.learnerName)} <small>${esc(a.regNumber || a.id)}</small></h2><button class="b-btn b-ghost" id="closeStmt" type="button">Close</button></div>
+        <div class="b-cards"><div class="b-card"><div class="k">Total due</div><div class="v">${usd(a.totalDueCents)}</div></div><div class="b-card"><div class="k">Total paid</div><div class="v">${usd(a.totalPaidCents)}</div></div><div class="b-card"><div class="k">Balance</div><div class="v ${a.balanceCents > 0 ? 'b-pos' : ''}">${usd(a.balanceCents)}</div></div></div>
+        ${mismatch ? '<p class="b-alert" role="alert">The statement lines do not add up to the stored balance. Check for entries older than the 200 shown, then tell the admin.</p>' : ''}
+        <div style="overflow-x:auto"><table class="b-table"><thead><tr><th>Date</th><th>Description</th><th>Reference</th><th class="b-num">Charges</th><th class="b-num">Payments</th><th class="b-num">Balance</th></tr></thead><tbody>${entries.map((e) => `<tr><td>${esc(fmtDate(e.date))}</td><td>${esc(e.desc)}${e.note ? ' <span class="b-tag bad">' + esc(e.note) + '</span>' : ''}</td><td>${esc(e.ref)}</td><td class="b-num">${e.charge ? usd(e.charge) : ''}</td><td class="b-num">${e.pay ? usd(e.pay) : ''}</td><td class="b-num">${usd(e.bal)}</td></tr>`).join('') || '<tr><td colspan="6">No entries yet.</td></tr>'}</tbody></table></div>
+        <div class="b-actions"><button class="b-btn" id="prStmt" type="button">Print or save as PDF</button><a class="b-btn b-ghost" href="payments.html?learner=${encodeURIComponent(id)}">Record payment</a></div>
+        <h3 class="b-h2" style="margin-top:18px">Add a charge or credit</h3>
+        <form id="chForm" class="b-form" novalidate>
+          <label>Type<select name="kind"><option value="charge">Extra charge</option><option value="credit">Credit or correction</option></select></label>
+          <label>Description<input name="desc" maxlength="120" required placeholder="e.g. Uniform, lost textbook"></label>
+          <label>Amount (USD)<input name="amt" inputmode="decimal" required placeholder="0.00"></label>
+          <div class="b-actions b-wide"><button class="b-btn" type="submit">Add to account</button></div></form>`;
+      $('#closeStmt').addEventListener('click', () => { stmt.hidden = true; });
+      $('#prStmt').addEventListener('click', () => printHTML(printable, 'a4'));
+      $('#chForm').addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const f = ev.target;
+        const btn = f.querySelector('button');
+        const desc = f.desc.value.trim();
+        let amt = toCents(f.amt.value);
+        if (!desc || !(amt > 0)) { toast('Enter a description and an amount above zero.', 'error'); return; }
+        const credit = f.kind.value === 'credit';
+        if (credit && !(await confirmBox(`Credit ${usd(amt)} to ${a.learnerName}? This reduces what they owe.`))) return;
+        btn.disabled = true;
+        try {
+          const signed = credit ? -amt : amt;
+          const b = fs.writeBatch(db);
+          const chRef = fs.doc(fs.collection(db, 'accounts', id, 'charges'));
+          b.set(chRef, { learnerId: id, campusId: a.campusId, termId: school.currentTermId || '', kind: credit ? 'credit' : 'manual', description: desc, amountCents: signed, date: todayISO(), createdAt: fs.serverTimestamp(), createdBy: profile.uid, updatedAt: fs.serverTimestamp() });
+          b.set(fs.doc(db, 'accounts', id), { totalDueCents: fs.increment(signed), balanceCents: fs.increment(signed), updatedAt: fs.serverTimestamp() }, { merge: true });
+          if (school.currentTermId) b.set(fs.doc(db, 'financeSummary', `${a.campusId}_${school.currentTermId}`), { campusId: a.campusId, termId: school.currentTermId, billedCents: fs.increment(signed), updatedAt: fs.serverTimestamp() }, { merge: true });
+          await b.commit();
+          await audit(credit ? 'account.credit' : 'account.charge', `accounts/${id}`, { description: desc, amountCents: signed });
+          toast('Added to account', 'success');
+          openStatement(id);
+          search();
+        } catch (err) { toast('Could not save: ' + (err.message || ''), 'error'); btn.disabled = false; }
+      });
+    } catch (e) { showErr(stmt, e); }
+  }
+
+  /* ---------- bulk open accounts and apply fees ---------- */
+  const prev = $('#preview');
+  let plan = null;
+  $('#previewBtn').addEventListener('click', async () => {
+    const campusId = $('#aCampus').value;
+    const termId = $('#aTerm').value;
+    if (!campusId || !termId) { toast('Choose a campus and a term.', 'error'); return; }
+    prev.innerHTML = '<div class="b-skel"></div>';
+    $('#previewBtn').disabled = true;
+    try {
+      const [lSnap, aSnap, sSnap] = await Promise.all([
+        fs.getDocs(fs.query(fs.collection(db, 'learners'), fs.where('campusId', '==', campusId), fs.where('status', '==', 'active'), fs.limit(1000))),
+        fs.getDocs(fs.query(fs.collection(db, 'accounts'), fs.where('campusId', '==', campusId), fs.limit(1500))),
+        fs.getDocs(fs.query(fs.collection(db, 'feeStructures'), fs.where('campusId', '==', campusId), fs.where('termId', '==', termId), fs.limit(60)))
+      ]);
+      const learners = lSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const accounts = new Map(aSnap.docs.map((d) => [d.id, d.data()]));
+      const structs = new Map(sSnap.docs.map((d) => { const s = d.data(); return [normForm(s.form), s]; }));
+      const chargeId = `${termId}_fees`;
+      // Which existing accounts were already billed this term?
+      const billed = new Set();
+      const existing = learners.filter((l) => accounts.has(l.id));
+      for (let i = 0; i < existing.length; i += 25) {
+        const part = existing.slice(i, i + 25);
+        const snaps = await Promise.all(part.map((l) => fs.getDoc(fs.doc(db, 'accounts', l.id, 'charges', chargeId))));
+        snaps.forEach((s, k) => { if (s.exists()) billed.add(part[k].id); });
+      }
+      const toBill = [], noStruct = [];
+      let newAccounts = 0, total = 0;
+      for (const l of learners) {
+        const st = structs.get(normForm(l.form));
+        const isNew = !accounts.has(l.id);
+        if (isNew) newAccounts++;
+        if (billed.has(l.id)) continue;
+        if (!st) { noStruct.push(l); if (isNew) toBill.push({ l, isNew, items: [], amount: 0 }); continue; }
+        const items = [...(st.items || []), ...(l.boarding ? (st.boardingItems || []) : [])];
+        const amount = items.reduce((s, i) => s + (i.amountCents || 0), 0);
+        total += amount;
+        toBill.push({ l, isNew, items, amount });
+      }
+      plan = { campusId, termId, toBill, total };
+      const withFee = toBill.filter((x) => x.amount > 0).length;
+      prev.innerHTML = `<div class="b-cards">
+        <div class="b-card"><div class="k">Active learners</div><div class="v">${learners.length}</div></div>
+        <div class="b-card"><div class="k">New accounts</div><div class="v">${newAccounts}</div></div>
+        <div class="b-card"><div class="k">To be billed</div><div class="v">${withFee}</div><div class="n">${billed.size} already billed this term</div></div>
+        <div class="b-card"><div class="k">Total to add</div><div class="v">${usd(total)}</div></div></div>
+        ${noStruct.length ? `<p class="b-alert">${noStruct.length} learner(s) have no fee structure for their form, so they are not billed: ${esc(noStruct.slice(0, 12).map((l) => `${l.fullName} (${l.form || 'no form'})`).join(', '))}${noStruct.length > 12 ? '...' : ''}. Add the structure in Fee structures, then run this again.</p>` : ''}
+        ${lSnap.size >= 1000 ? '<p class="b-alert">Only the first 1000 learners were loaded. Run this again after applying to pick up the rest.</p>' : ''}
+        <div class="b-actions"><button class="b-btn" id="applyBtn" type="button"${toBill.length ? '' : ' disabled'}>Apply now</button></div>`;
+      const ab = $('#applyBtn');
+      if (ab) ab.addEventListener('click', apply);
+    } catch (e) { showErr(prev, e); plan = null; }
+    $('#previewBtn').disabled = false;
+  });
+
+  async function apply() {
+    if (!plan) return;
+    if (!(await confirmBox(`Create accounts and add fees totalling ${usd(plan.total)} for ${plan.toBill.length} learner(s)?`))) return;
+    const btn = $('#applyBtn');
+    btn.disabled = true;
+    const { campusId, termId, toBill } = plan;
+    const term = terms.find((t) => t.id === termId);
+    try {
+      let done = 0;
+      for (let i = 0; i < toBill.length; i += 150) {
+        const part = toBill.slice(i, i + 150);
+        const b = fs.writeBatch(db);
+        let sum = 0;
+        for (const { l, isNew, items, amount } of part) {
+          const accRef = fs.doc(db, 'accounts', l.id);
+          const data = { learnerId: l.id, regNumber: l.regNumber || l.id, learnerName: l.fullName || '', campusId, form: l.form || '', classId: l.classId || '', boarding: !!l.boarding, updatedAt: fs.serverTimestamp() };
+          if (isNew) { data.financeRegNumber = `FIN-${l.regNumber || l.id}`; data.totalPaidCents = 0; data.totalDueCents = amount; data.balanceCents = amount; data.createdAt = fs.serverTimestamp(); data.createdBy = profile.uid; }
+          else { data.totalDueCents = fs.increment(amount); data.balanceCents = fs.increment(amount); }
+          b.set(accRef, data, { merge: true });
+          if (amount > 0) {
+            b.set(fs.doc(db, 'accounts', l.id, 'charges', `${termId}_fees`), { learnerId: l.id, campusId, termId, kind: 'fees', description: `School fees ${termLabel(term)}`, items, amountCents: amount, date: todayISO(), createdAt: fs.serverTimestamp(), createdBy: profile.uid, updatedAt: fs.serverTimestamp() });
+            sum += amount;
+          }
+        }
+        if (sum > 0) b.set(fs.doc(db, 'financeSummary', `${campusId}_${termId}`), { campusId, termId, billedCents: fs.increment(sum), updatedAt: fs.serverTimestamp() }, { merge: true });
+        await b.commit();
+        done += part.length;
+        btn.textContent = `Working... ${done} of ${toBill.length}`;
+      }
+      await audit('accounts.applyFees', `feeStructures/${campusId}_${termId}`, { learners: toBill.length, totalCents: plan.total });
+      toast('Accounts opened and fees applied', 'success');
+      plan = null;
+      prev.innerHTML = `<p class="b-alert" role="status">Done. ${done} learner(s) processed. Open the Accounts tab to see them.</p>`;
+      search();
+    } catch (e) {
+      toast('Stopped part way: ' + (e.message || ''), 'error');
+      prev.insertAdjacentHTML('beforeend', '<p class="b-err">Some learners may already be done. Click Preview again to see what is left. Nobody is billed twice.</p>');
+    }
+  }
+
+  search();
+  const want = new URLSearchParams(location.search).get('learner');
+  if (want) openStatement(want.toUpperCase());
+});
+</script>
+</body>
+</html>

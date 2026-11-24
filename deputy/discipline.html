@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Discipline · Deputy · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: record merits, demerits and cases, summon parents with a notice, search a learner's history. Role: deputy (admin allowed).
+// Collections: discipline (write), notices (create), learners (read to find guardian campus).
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, renderShell, setLoading } from '../shared/ui.js';
+import { crud, loadRef } from '../admin/js/crud.js';
+import { DEPUTY_NAV } from './js/nav.js';
+A.requireRole(['deputy', 'admin'], async me => {
+  const main = renderShell({ role: 'deputy', title: 'Discipline', nav: DEPUTY_NAV });
+  main.insertAdjacentHTML('afterbegin', '<p style="color:var(--muted)">Search by registration number to see a learner’s history.</p>');
+  crud({ main, title: 'Discipline records', coll: 'discipline', me, defaults: { reportedBy: me.uid, parentNotified: false },
+    fields: [['learnerId', 'Learner reg number', 'text'], ['type', 'Type', 'select', ['merit', 'demerit', 'case']], ['points', 'Points', 'number'], ['description', 'Description', 'textarea'], ['parentNotified', 'Parent notified', 'bool']],
+    actions: [{ label: 'Summon parent', fn: async r => { try {
+      const l = (await fs.getDoc(fs.doc(db, 'learners', r.learnerId))).data(); if (!l) return toast('No learner with that reg number.', 'error');
+      const n = await fs.addDoc(fs.collection(db, 'notices'), { title: 'Parent summons: ' + l.fullName, body: 'Please see the deputy head regarding: ' + r.description, audience: ['direct'], targetUids: l.guardianUids || [], learnerId: l.id || r.learnerId, campusId: l.campusId, pinned: false, publishAt: new Date().toISOString().slice(0, 10), createdAt: fs.serverTimestamp(), createdBy: me.uid, updatedAt: fs.serverTimestamp() });
+      await fs.updateDoc(fs.doc(db, 'discipline', r.id), { parentNotified: true, updatedAt: fs.serverTimestamp() }); await A.audit('discipline.summon', 'notices/' + n.id, { learnerId: r.learnerId }); toast('Notice sent to the parent. Reload to see the update.', 'success');
+    } catch (e) { console.error(e); toast('Could not send the notice.', 'error'); } } }] });
+});
+</script></body></html>

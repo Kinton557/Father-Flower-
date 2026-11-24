@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Users · Admin · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: list, add, edit, disable, reset password, bulk-import users. Role: admin.
+// Collections: users (read/write), campuses (read), auditLog (via audit()).
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, toast, modal, confirmBox, renderShell, setLoading, printElement } from '../shared/ui.js';
+import { ADMIN_NAV } from './js/nav.js';
+
+const ROLES = ['admin','head','deputy','sdc','bursar','boarding','teacher','learner','parent'];
+const PAGE = 50;
+const tempPassword = () => { const c = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789', r = new Uint32Array(8); crypto.getRandomValues(r); return [...r].map(n => c[n % c.length]).join(''); };
+const inp = (id, label, v = '', type = 'text') => `<label style="display:block;margin-bottom:10px">${esc(label)}<input id="${id}" type="${type}" value="${esc(v)}" style="display:block;width:100%;min-height:44px;padding:8px;border:1px solid var(--line);border-radius:10px"></label>`;
+const $ = id => document.getElementById(id);
+
+A.requireRole(['admin'], async me => {
+  const main = renderShell({ role: 'admin', title: 'Users', nav: ADMIN_NAV });
+  let campuses = [], rows = [], last = null, more = false;
+  try { campuses = (await fs.getDocs(fs.query(fs.collection(db, 'campuses'), fs.limit(50)))).docs.map(d => ({ id: d.id, name: d.data().name })); } catch (e) { console.error(e); }
+  const campOpts = (sel, all = false) => (all ? `<option value="">All campuses</option>` : '') + `<option value="all"${sel === 'all' ? ' selected' : ''}>All (head office)</option>` + campuses.map(c => `<option value="${esc(c.id)}"${sel === c.id ? ' selected' : ''}>${esc(c.name)}</option>`).join('');
+  const roleOpts = (sel, all = false) => (all ? `<option value="">All roles</option>` : '') + ROLES.map(r => `<option${r === sel ? ' selected' : ''}>${r}</option>`).join('');
+
+  main.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+    <input id="q" placeholder="Search name or ID" aria-label="Search" style="flex:1 1 180px;min-height:44px;padding:8px;border:1px solid var(--line);border-radius:10px">
+    <select id="fr" aria-label="Role" style="min-height:44px">${roleOpts('', true)}</select>
+    <select id="fc" aria-label="Campus" style="min-height:44px">${campOpts('', true).replace('<option value="all">All (head office)</option>', '')}</select>
+    <button id="add" class="btn btn-primary" style="min-height:44px">Add user</button>
+    <button id="imp" class="btn" style="min-height:44px">Import CSV</button></div>
+    <div id="list"></div><button id="more" class="btn" style="min-height:44px;margin-top:12px" hidden>Load more</button>`;
+
+  async function load(reset) {
+    const list = $('list');
+    if (reset) { rows = []; last = null; }
+    setLoading(list, true);
+    try {
+      const cs = [fs.collection(db, 'users')];
+      if ($('fr').value) cs.push(fs.where('role', '==', $('fr').value));
+      if ($('fc').value) cs.push(fs.where('campusId', '==', $('fc').value));
+      if (last) cs.push(fs.startAfter(last));
+      cs.push(fs.limit(PAGE));
+      const snap = await fs.getDocs(fs.query(...cs));
+      snap.docs.forEach(d => rows.push({ uid: d.id, ...d.data() }));
+      last = snap.docs[snap.docs.length - 1] || last; more = snap.size === PAGE;
+    } catch (e) { console.error(e); list.innerHTML = `<p role="alert" style="color:var(--danger)">Could not load users. Refresh and try again.</p>`; setLoading(list, false); return; }
+    setLoading(list, false); draw();
+  }
+  function draw() {
+    const t = $('q').value.trim().toLowerCase();
+    const v = rows.filter(r => !t || (r.fullName || '').toLowerCase().includes(t) || (r.loginId || '').toLowerCase().includes(t)).sort((a, b) => (a.fullName || '').localeCompare(b.fullName || ''));
+    $('more').hidden = !more;
+    $('list').innerHTML = v.length ? v.map(r => `<div class="card" style="padding:12px 16px;margin-bottom:8px;opacity:${r.active ? 1 : .6}">
+      <div style="display:flex;justify-content:space-between;gap:8px"><strong>${esc(r.fullName)}</strong><span>${esc(r.role)}${r.active ? '' : ' (disabled)'}</span></div>
+      <div style="color:var(--muted);font-size:.9rem">${esc(r.loginId)} · ${esc(r.campusId)} · ${esc(r.phone || '')}</div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+        <button class="btn" style="min-height:44px" data-a="edit" data-u="${esc(r.uid)}">Edit</button>
+        <button class="btn" style="min-height:44px" data-a="reset" data-u="${esc(r.uid)}">Reset password</button>
+        <button class="btn" style="min-height:44px" data-a="toggle" data-u="${esc(r.uid)}">${r.active ? 'Disable' : 'Enable'}</button></div></div>`).join('')
+      : `<p>No users match. Add one with “Add user”.</p>`;
+  }
+  const slip = items => modal({ title: 'Credential slip', bodyHTML: `<div id="slip">${items.map(i => `<div style="border:1px dashed #999;padding:10px;margin-bottom:8px"><strong>${esc(i.fullName)}</strong> (${esc(i.role)})<br>ID: <b>${esc(i.loginId)}</b><br>Temporary password: <b>${esc(i.password)}</b><br>You must change it at first login.</div>`).join('')}</div>`, actions: [{ label: 'Print', primary: true, onClick: () => { printElement($('slip')); return false; } }, { label: 'Close' }] });
+
+  function form(u = {}) {
+    const edit = !!u.uid;
+    modal({ title: edit ? 'Edit user' : 'Add user', bodyHTML: inp('f-id', 'ID number', u.loginId, 'text').replace('<input', edit ? '<input disabled' : '<input') + inp('f-name', 'Full name', u.fullName) +
+      `<label style="display:block;margin-bottom:10px">Role<select id="f-role" style="display:block;width:100%;min-height:44px">${roleOpts(u.role)}</select></label>
+       <label style="display:block;margin-bottom:10px">Campus<select id="f-camp" style="display:block;width:100%;min-height:44px">${campOpts(u.campusId)}</select></label>` + inp('f-email', 'Email (needed for Google sign-in)', u.email, 'email') + inp('f-phone', 'Phone', u.phone, 'tel'),
+      actions: [{ label: edit ? 'Save changes' : 'Create user', primary: true, onClick: async () => {
+        const v = { loginId: $('f-id').value.trim(), fullName: $('f-name').value.trim(), role: $('f-role').value, campusId: $('f-camp').value, email: $('f-email').value.trim(), phone: $('f-phone').value.trim() };
+        if (!/^[A-Za-z0-9]{3,20}$/.test(v.loginId) || !v.fullName || !v.campusId) { toast('Enter an ID (letters and digits), a name and a campus.', 'error'); return false; }
+        if (v.campusId === 'all' && !['admin', 'head'].includes(v.role)) { toast('Only admin and head can cover all campuses.', 'error'); return false; }
+        try {
+          if (edit) {
+            await fs.updateDoc(fs.doc(db, 'users', u.uid), { fullName: v.fullName, role: v.role, campusId: v.campusId, email: v.email, phone: v.phone, updatedAt: fs.serverTimestamp() });
+            if (v.role !== u.role) await A.audit('user.roleChange', 'users/' + u.uid, { from: u.role, to: v.role });
+            toast('Saved', 'success');
+          } else {
+            const password = tempPassword();
+            const uid = await A.createUserAccount({ ...v, password, extra: {} });
+            await A.audit('user.create', 'users/' + uid, { role: v.role, loginId: v.loginId });
+            toast('User created', 'success'); setTimeout(() => slip([{ ...v, password }]), 50);
+          }
+          load(true);
+        } catch (e) { console.error(e); toast(e.code === 'auth/email-already-in-use' ? 'That ID already exists.' : 'Could not save. Try again.', 'error'); return false; }
+      } }, { label: 'Cancel' }] });
+  }
+
+  const parseCSV = txt => txt.trim().split(/\r?\n/).map(l => (l.match(/("([^"]|"")*"|[^,]*)(,|$)/g) || []).map(c => c.replace(/,$/, '').replace(/^"|"$/g, '').replace(/""/g, '"').trim()));
+  function importCSV() {
+    modal({ title: 'Import users from CSV', bodyHTML: `<p>Columns: loginId, fullName, role, campusId, email, phone. A password is generated for each row.</p><input id="csv" type="file" accept=".csv,text/csv" aria-label="CSV file"><div id="prev" style="margin-top:10px;max-height:240px;overflow:auto"></div>`,
+      actions: [{ label: 'Create valid users', primary: true, onClick: async () => {
+        const ok = ($('csv')._rows || []).filter(r => !r.err);
+        if (!ok.length) { toast('Choose a CSV with valid rows first.', 'error'); return false; }
+        const done = [];
+        for (const r of ok) { try { const password = tempPassword(); const uid = await A.createUserAccount({ ...r.v, password, extra: {} }); await A.audit('user.create', 'users/' + uid, { role: r.v.role, bulk: true }); done.push({ ...r.v, password }); } catch (e) { console.error(e); toast(`Skipped ${r.v.loginId}: could not create.`, 'error'); } }
+        load(true); if (done.length) setTimeout(() => slip(done), 50);
+      } }, { label: 'Cancel' }] });
+    $('csv').onchange = async e => {
+      const f = e.target.files[0]; if (!f) return;
+      const [, ...body] = parseCSV(await f.text()); const seen = new Set();
+      e.target._rows = body.filter(r => r.some(Boolean)).slice(0, 300).map(c => {
+        const v = { loginId: c[0] || '', fullName: c[1] || '', role: (c[2] || '').toLowerCase(), campusId: c[3] || '', email: c[4] || '', phone: c[5] || '' };
+        let err = !/^[A-Za-z0-9]{3,20}$/.test(v.loginId) ? 'bad ID' : !v.fullName ? 'no name' : !ROLES.includes(v.role) ? 'bad role' : !v.campusId ? 'no campus' : seen.has(v.loginId.toLowerCase()) ? 'duplicate' : '';
+        seen.add(v.loginId.toLowerCase()); return { v, err };
+      });
+      $('prev').innerHTML = e.target._rows.map(r => `<div style="color:${r.err ? 'var(--danger)' : 'var(--ok)'}">${esc(r.v.loginId)} · ${esc(r.v.fullName)} · ${esc(r.v.role)} ${r.err ? '✖ ' + r.err : '✔'}</div>`).join('') || 'No rows found.';
+    };
+  }
+
+  main.addEventListener('click', async e => {
+    const b = e.target.closest('[data-a]'); if (!b) return;
+    const u = rows.find(r => r.uid === b.dataset.u); if (!u) return;
+    if (b.dataset.a === 'edit') form(u);
+    if (b.dataset.a === 'toggle' && await confirmBox(`${u.active ? 'Disable' : 'Enable'} ${u.fullName}?`)) {
+      if (u.uid === me.uid) return toast('You cannot disable your own account.', 'error');
+      try { await fs.updateDoc(fs.doc(db, 'users', u.uid), { active: !u.active, updatedAt: fs.serverTimestamp() }); await A.audit(u.active ? 'user.disable' : 'user.enable', 'users/' + u.uid, {}); toast('Updated', 'success'); load(true); } catch (x) { console.error(x); toast('Could not update.', 'error'); }
+    }
+    if (b.dataset.a === 'reset' && await confirmBox(`Reset password for ${u.fullName}?`)) {
+      if (typeof A.resetUserPassword !== 'function') return toast('Password reset is not available yet. Ask the integrator to add resetUserPassword().', 'error');
+      try { const password = tempPassword(); await A.resetUserPassword(u.uid, password); await A.audit('user.passwordReset', 'users/' + u.uid, {}); slip([{ ...u, password }]); } catch (x) { console.error(x); toast('Could not reset the password.', 'error'); }
+    }
+  });
+  $('add').onclick = () => form(); $('imp').onclick = importCSV; $('more').onclick = () => load(false);
+  $('q').oninput = draw; $('fr').onchange = $('fc').onchange = () => load(true);
+  load(true);
+});
+</script></body></html>

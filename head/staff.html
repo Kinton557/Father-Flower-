@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Staff · Head · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+// Purpose: staff list and missing marks by teacher for the current term. Role: head (admin allowed).
+// Collections read: users, settings/school, allocations, assessments, marks, learners, classes. Scheme/lesson-plan status needs a collection (see Requests).
+import * as A from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, renderShell, setLoading } from '../shared/ui.js';
+import { HEAD_NAV } from './js/nav.js';
+const $ = id => document.getElementById(id), col = n => fs.collection(db, n);
+A.requireRole(['head', 'admin'], async me => {
+  const main = renderShell({ role: 'head', title: 'Staff', nav: HEAD_NAV });
+  main.innerHTML = `<h2>Missing marks this term</h2><div id="m"></div><h2 style="margin-top:24px">Staff list</h2><div id="s"></div>`;
+  const cw = me.campusId === 'all' ? [] : [fs.where('campusId', '==', me.campusId)];
+  setLoading($('s'), true); setLoading($('m'), true); let users = {};
+  try {
+    const us = await fs.getDocs(fs.query(col('users'), fs.where('role', 'in', ['deputy', 'teacher', 'bursar', 'boarding', 'sdc']), ...cw, fs.limit(200)));
+    us.forEach(d => users[d.id] = d.data());
+    $('s').innerHTML = Object.values(users).sort((a, b) => a.fullName.localeCompare(b.fullName)).map(u => `<div class="card" style="padding:10px 16px;margin-bottom:6px;display:flex;justify-content:space-between;opacity:${u.active ? 1 : .55}"><span>${esc(u.fullName)}</span><span style="color:var(--muted)">${esc(u.role)} · ${esc(u.phone || '')}</span></div>`).join('') || '<p>No staff found.</p>';
+  } catch (e) { console.error(e); $('s').innerHTML = `<p role="alert" style="color:var(--danger)">Could not load staff.</p>`; }
+  setLoading($('s'), false);
+  try {
+    const tid = (await fs.getDoc(fs.doc(db, 'settings', 'school'))).data()?.currentTermId;
+    if (!tid) { $('m').innerHTML = '<p>No current term is set. The admin can set one under Academic.</p>'; setLoading($('m'), false); return; }
+    const q = n => fs.getDocs(fs.query(col(n), fs.where('termId', '==', tid), fs.limit(1000)));
+    const [al, as, mk] = await Promise.all([q('allocations'), q('assessments'), q('marks')]), done = {}, size = {};
+    mk.forEach(d => done[d.data().assessmentId] = (done[d.data().assessmentId] || 0) + 1);
+    await Promise.all([...new Set(al.docs.map(d => d.data().classId))].map(async k => size[k] = (await fs.getDocs(fs.query(col('learners'), fs.where('classId', '==', k), fs.where('status', '==', 'active'), fs.limit(200)))).size));
+    const miss = {}; al.forEach(d => { const a = d.data(); miss[a.teacherUid] ||= 0; });
+    as.forEach(d => { const a = d.data(), al2 = al.docs.find(x => x.id === a.allocationId); if (al2) miss[al2.data().teacherUid] += Math.max(0, (size[a.classId] || 0) - (done[d.id] || 0)); });
+    const v = Object.entries(miss).filter(([u]) => me.campusId === 'all' || users[u]);
+    $('m').innerHTML = v.length ? v.sort((a, b) => b[1] - a[1]).map(([u, n]) => `<div class="card" style="padding:10px 16px;margin-bottom:6px;display:flex;justify-content:space-between"><span>${esc(users[u]?.fullName || u)}</span><strong style="color:${n ? 'var(--danger)' : 'var(--ok)'}">${n} missing</strong></div>`).join('') : '<p>No allocations this term.</p>';
+  } catch (e) { console.error(e); $('m').innerHTML = `<p role="alert" style="color:var(--danger)">Could not check marks.</p>`; }
+  setLoading($('m'), false);
+});
+</script></body></html>

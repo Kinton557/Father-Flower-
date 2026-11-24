@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bursar overview | Father Flower</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="../shared/ui.css">
+<link rel="stylesheet" href="./css/bursar.css">
+</head>
+<body>
+<script type="module">
+/*
+ * bursar/index.html
+ * Purpose: bursar home. Collected today and this term, outstanding, debtors count, recent payments.
+ * Role allowed: bursar, admin.
+ * Collections used: payments, financeSummary, accounts, terms, settings/school (read).
+ */
+import { requireRole } from '../shared/auth.js';
+import { db, fs } from '../shared/firebase.js';
+import { esc, renderShell, fmtDate } from '../shared/ui.js';
+import { navFor, scopeWhere, todayISO, usd, loadTerms, getSchool, pickCurrentTerm, termLabel, METHODS, showErr } from './js/common.js';
+
+requireRole(['bursar', 'admin'], async (profile) => {
+  const main = renderShell({ role: profile.role, title: 'Bursar', nav: navFor(profile.role) });
+  main.innerHTML = `
+    <div class="b-head"><h1>Fees overview</h1><span class="b-sub" id="termTxt"></span></div>
+    <div class="b-cards" id="cards"><div class="b-skel"></div><div class="b-skel"></div><div class="b-skel"></div><div class="b-skel"></div></div>
+    <div class="b-actions" style="margin:0 0 20px">
+      <a class="b-btn" href="payments.html" style="text-decoration:none;display:inline-flex;align-items:center">Record payment</a>
+      <a class="b-btn b-ghost" href="accounts.html" style="text-decoration:none;display:inline-flex;align-items:center">Apply fees</a>
+      <a class="b-btn b-ghost" href="debtors.html" style="text-decoration:none;display:inline-flex;align-items:center">Debtors</a>
+      <a class="b-btn b-ghost" href="cashup.html" style="text-decoration:none;display:inline-flex;align-items:center">Daily cash-up</a>
+    </div>
+    <section class="b-panel"><h2 class="b-h2">Recent payments</h2><div id="recent"><div class="b-skel"></div></div></section>`;
+  const cards = main.querySelector('#cards');
+  const recent = main.querySelector('#recent');
+  const base = scopeWhere(profile);
+  try {
+    const [terms, school] = await Promise.all([loadTerms(), getSchool()]);
+    const term = pickCurrentTerm(terms, school);
+    main.querySelector('#termTxt').textContent = term ? termLabel(term) : 'No term set';
+
+    const todayQ = fs.getDocs(fs.query(fs.collection(db, 'payments'), ...base, fs.where('paidOn', '==', todayISO()), fs.limit(500)));
+    const sumQ = term
+      ? fs.getDocs(fs.query(fs.collection(db, 'financeSummary'), ...base, fs.where('termId', '==', term.id), fs.limit(50)))
+      : Promise.resolve({ docs: [] });
+    const debtQ = fs.getDocs(fs.query(fs.collection(db, 'accounts'), ...base, fs.where('balanceCents', '>', 0), fs.orderBy('balanceCents', 'desc'), fs.limit(500)));
+    const recentQ = fs.getDocs(fs.query(fs.collection(db, 'payments'), ...base, fs.orderBy('createdAt', 'desc'), fs.limit(8)));
+    const [todaySnap, sumSnap, debtSnap, recentSnap] = await Promise.all([todayQ, sumQ, debtQ, recentQ]);
+
+    const today = todaySnap.docs.map((d) => d.data()).filter((p) => !p.reversed).reduce((s, p) => s + (p.amountCents || 0), 0);
+    const termCollected = sumSnap.docs.reduce((s, d) => s + (d.data().collectedCents || 0), 0);
+    const termBilled = sumSnap.docs.reduce((s, d) => s + (d.data().billedCents || 0), 0);
+    const outstanding = debtSnap.docs.reduce((s, d) => s + (d.data().balanceCents || 0), 0);
+    const capped = debtSnap.size >= 500;
+
+    cards.innerHTML = `
+      <div class="b-card"><div class="k">Collected today</div><div class="v">${usd(today)}</div><div class="n">${todaySnap.size} receipts</div></div>
+      <div class="b-card"><div class="k">Collected this term</div><div class="v">${usd(termCollected)}</div><div class="n">Billed ${usd(termBilled)}</div></div>
+      <div class="b-card"><div class="k">Outstanding total</div><div class="v">${usd(outstanding)}</div><div class="n">${capped ? 'At least, top 500 debtors' : 'All accounts in debt'}</div></div>
+      <div class="b-card"><div class="k">Debtors</div><div class="v">${debtSnap.size}${capped ? '+' : ''}</div><div class="n">Accounts with a balance</div></div>`;
+
+    if (!recentSnap.size) {
+      recent.innerHTML = '<div class="b-empty">No payments recorded yet.</div>';
+    } else {
+      recent.innerHTML = `<table class="b-table stack"><thead><tr><th>Receipt</th><th>Date</th><th>Learner</th><th>Method</th><th class="b-num">Amount</th></tr></thead><tbody>
+        ${recentSnap.docs.map((d) => { const p = d.data(); return `<tr>
+          <td data-label="Receipt">${esc(p.receiptNumber)}${p.reversed ? ' <span class="b-tag bad">Reversed</span>' : ''}</td>
+          <td data-label="Date">${esc(fmtDate(p.paidOn))}</td>
+          <td data-label="Learner">${esc(p.learnerName || p.learnerId)}</td>
+          <td data-label="Method">${esc(METHODS[p.method] || p.method)}</td>
+          <td data-label="Amount" class="b-num">${usd(p.amountCents)}</td></tr>`; }).join('')}</tbody></table>`;
+    }
+  } catch (e) {
+    showErr(cards, e);
+    recent.innerHTML = '';
+  }
+});
+</script>
+</body>
+</html>

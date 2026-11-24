@@ -1,0 +1,20 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Materials · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* learner/materials.html — notes and links from teachers for my class. Role: learner. Collections: learners, materials, subjects */
+import { requireRole } from '../shared/auth.js';
+import { renderShell, esc } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, list, getMyLearner } from './js/common.js';
+const { where, doc, getDoc } = fs;
+requireRole(['learner'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'learner', title: 'Materials', nav: NAV });
+  main.innerHTML = '<p class="muted">Loading…</p>';
+  try {
+    const l = await getMyLearner(p); if (!l) { main.innerHTML = '<div class="tcard">Your learner record is not linked yet.</div>'; return; }
+    const ms = await list('materials', where('classId', '==', l.classId)), g = {};
+    for (const m of ms) { if (!g[m.subjectId]) { const s = await getDoc(doc(db, 'subjects', m.subjectId)); g[m.subjectId] = { n: s.exists() ? s.data().name : m.subjectId, a: [] }; } g[m.subjectId].a.push(m); }
+    main.innerHTML = Object.values(g).map(x => `<div class="tcard" style="margin-bottom:10px"><h3>${esc(x.n)}</h3>${x.a.map(m => `<p><a href="${esc(m.url)}" target="_blank" rel="noopener">${esc(m.title)}</a> <span class="pill">${esc(m.kind)}</span></p>`).join('')}</div>`).join('') || '<p class="muted">No materials yet.</p>';
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load materials.</div>'; }
+});
+</script></body></html>

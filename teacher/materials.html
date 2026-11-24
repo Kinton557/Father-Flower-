@@ -1,0 +1,38 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Materials · Father Flower</title><link rel="stylesheet" href="../shared/ui.css"></head><body>
+<script type="module">
+/* teacher/materials.html — upload notes / add links per class and subject. Role: teacher (own), admin. Collections: materials (requested), allocations */
+import { requireRole, audit } from '../shared/auth.js';
+import { renderShell, esc, toast, confirmBox, setLoading, saveFile } from '../shared/ui.js';
+import { fs, db } from '../shared/firebase.js';
+import { NAV, injectStyles, list, loadContext } from './js/common.js';
+const { collection, doc, addDoc, deleteDoc, serverTimestamp, where } = fs;
+requireRole(['teacher', 'admin'], async p => {
+  injectStyles();
+  const main = renderShell({ role: 'teacher', title: 'Materials', nav: NAV });
+  try {
+    const ctx = await loadContext(p);
+    if (!ctx.term) { main.innerHTML = '<div class="tcard">No current term set.</div>'; return; }
+    main.innerHTML = `<div class="trow"><label>Class &amp; subject<select id="al"></select></label></div><form id="f" class="tcard" novalidate><h3>Add material</h3><div class="trow"><label>Title<input id="t" maxlength="80"></label><label>Link (optional)<input id="u" type="url" placeholder="https://"></label><label>File (optional)<input id="fl" type="file"></label></div><button class="tbtn" id="go">Add</button></form><h2>Materials</h2><div id="ls"></div>`;
+    const $ = id => main.querySelector('#' + id), cur = () => ctx.allocations.find(a => a.id === $('al').value);
+    $('al').innerHTML = ctx.allocations.map(a => `<option value="${esc(a.id)}">${esc(ctx.label(a))}</option>`).join('') || '<option value="">No allocations</option>';
+    async function show() {
+      const a = cur(); if (!a) { $('ls').innerHTML = '<p class="muted">No allocation.</p>'; return; }
+      try {
+        const ms = await list('materials', where('classId', '==', a.classId), where('subjectId', '==', a.subjectId));
+        $('ls').innerHTML = ms.map(m => `<div class="tcard" style="margin-bottom:8px"><a href="${esc(m.url)}" target="_blank" rel="noopener">${esc(m.title)}</a> <span class="pill">${esc(m.kind)}</span> <button class="tbtn danger" data-id="${esc(m.id)}">Delete</button></div>`).join('') || '<p class="muted">No materials yet.</p>';
+        $('ls').onclick = async e => { const id = e.target.dataset.id; if (!id || !(await confirmBox('Delete this material?'))) return; try { await deleteDoc(doc(db, 'materials', id)); await audit('delete_material', 'materials/' + id, {}); show(); } catch (err) { console.error(err); toast('Could not delete.', 'error'); } };
+      } catch (e) { console.error(e); $('ls').innerHTML = '<p class="muted">Could not load.</p>'; }
+    }
+    $('f').onsubmit = async e => {
+      e.preventDefault(); const a = cur(), t = $('t').value.trim(), u = $('u').value.trim(), f = $('fl').files[0];
+      if (!a) return toast('Choose a class and subject.', 'error'); if (!t) return toast('Enter a title.', 'error'); if (!u && !f) return toast('Add a link or a file.', 'error');
+      if (u && !/^https?:\/\//i.test(u)) return toast('The link must start with http:// or https://', 'error');
+      setLoading($('go'), true);
+      try { const url = f ? (await saveFile(f, 'materials')).url : u; await addDoc(collection(db, 'materials'), { classId: a.classId, subjectId: a.subjectId, termId: ctx.term.id, title: t, url, kind: f ? 'file' : 'link', createdAt: serverTimestamp(), createdBy: p.uid, updatedAt: serverTimestamp() }); toast('Added', 'success'); $('f').reset(); show(); }
+      catch (err) { console.error(err); toast('Could not add it. Try again.', 'error'); }
+      setLoading($('go'), false);
+    };
+    $('al').onchange = show; show();
+  } catch (e) { console.error(e); main.innerHTML = '<div class="tcard">Could not load. Refresh and try again.</div>'; }
+});
+</script></body></html>
